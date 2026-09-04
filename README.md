@@ -1,4 +1,4 @@
-# Document Analysis
+# PrivateI
 
 Upload documents, they get read and processed, and the people, places, and
 events in them appear as a graph you can click through.
