@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Report</h1>
+<p class="note small">
+  The objective is entered once and kept. Each allegation is answered on its own,
+  from its own evidence, and every finding cites the file and page it rests on.
+  {% if not chat_model %}<strong>TEXT_MODEL is not set, so no report can be written.</strong>{% endif %}
+</p>
+
+<label class="small" for="objective">Investigative objective — one allegation per line</label>
+<textarea id="objective" rows="7" spellcheck="false"
+  placeholder="1. That on or about 14 May 2026, MSgt Doe used a government vehicle for personal purposes.&#10;2. That MSgt Doe made inappropriate remarks to a subordinate.">{{ objective }}</textarea>
+
+<div class="row">
+  <button id="save" class="btn">Save objective</button>
+  <button id="run" {% if not chat_model %}disabled{% endif %}>Run report</button>
+  <span id="status" class="small"></span>
+</div>
+
+<div id="out" class="report-out" hidden></div>
+
+{% if previous %}
+<h2>Previous reports</h2>
+<table>
+  <tr><th>Generated</th><th>Model</th><th>Documents</th><th>Facts</th><th></th></tr>
+  {% for r in previous %}
+  <tr>
+    <td class="small">{{ r.created_at }}</td>
+    <td class="small">{{ r.model }}</td>
+    <td>{{ r.documents }}</td>
+    <td>{{ r.assertions }}</td>
+    <td><a class="btn" href="/reports/{{ r.report_id }}">Download</a></td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+const objective = document.getElementById('objective');
+const statusEl = document.getElementById('status');
+const out = document.getElementById('out');
+
+document.getElementById('save').addEventListener('click', async () => {
+  const res = await fetch('/api/objective', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ objective: objective.value }),
+  });
+  const d = await res.json();
+  statusEl.textContent = `saved — ${d.allegations} allegation(s)`;
+});
+
+document.getElementById('run').addEventListener('click', async () => {
+  out.hidden = false;
+  out.textContent = '';
+  statusEl.textContent = 'starting…';
+  const run = document.getElementById('run');
+  run.disabled = true;
+
+  try {
+    const res = await fetch('/api/report', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ objective: objective.value }),
+    });
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split('\n\n');
+      buffer = parts.pop();
+      for (const part of parts) {
+        const kind = (part.match(/^event: (.+)$/m) || [])[1];
+        const raw = (part.match(/^data: ([\s\S]*)$/m) || [])[1];
+        if (!kind || raw === undefined) continue;
+        let data; try { data = JSON.parse(raw); } catch { continue; }
+        if (kind === 'status') {
+          statusEl.textContent = data;
+        } else if (kind === 'token') {
+          out.textContent += data;
+          out.scrollTop = out.scrollHeight;
+        } else if (kind === 'error') {
+          statusEl.textContent = 'failed';
+          out.textContent += '\n\n' + data;
+        } else if (kind === 'done') {
+          statusEl.innerHTML = `finished — <a href="/reports/${data.report_id}">download</a>`;
+        }
+      }
+    }
+  } catch (err) {
+    statusEl.textContent = 'failed: ' + err;
+  } finally {
+    run.disabled = false;
+  }
+});
+</script>
+{% endblock %}

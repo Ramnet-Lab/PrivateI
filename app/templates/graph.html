@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block main_attrs %} class="full"{% endblock %}
+{% block content %}
+<div class="graph-wrap">
+  <div id="net"></div>
+
+  <aside id="panel" class="panel">
+    <p class="panel-empty">Click any node to see what it is connected to, and the
+    exact wording each connection came from.</p>
+  </aside>
+
+  <div class="graph-tools">
+    <input id="search" type="search" placeholder="find a name…" autocomplete="off">
+    <select id="typeFilter">
+      <option value="">all types</option>
+      <option>PERSON</option><option>ORG</option><option>LOCATION</option>
+      <option>EVENT</option><option>DOCUMENT</option><option>CLAIM</option>
+    </select>
+    <button id="refit" class="btn">Fit</button>
+    <span id="graphStatus" class="small"></span>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/vis-network.min.js"></script>
+<script src="/static/graph.js"></script>
+{% endblock %}

@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Document Analysis{% endblock %}</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="bar">
+  <nav>
+    <a href="/" {% if request.url.path == '/' %}class="on"{% endif %}>Documents</a>
+    <a href="/chat" {% if request.url.path == '/chat' %}class="on"{% endif %}>Chat</a>
+    <a href="/graph" {% if request.url.path == '/graph' %}class="on"{% endif %}>Graph</a>
+    <a href="/timeline" {% if request.url.path == '/timeline' %}class="on"{% endif %}>Timeline</a>
+    <a href="/report" {% if request.url.path == '/report' %}class="on"{% endif %}>Report</a>
+  </nav>
+  <div class="stats">
+    <span>{{ c.documents }} docs</span>
+    <span>{{ c.pages }} pages</span>
+    <span>{{ c.entities }} entities</span>
+    <span>{{ c.assertions }} facts</span>
+  </div>
+</header>
+<main{% block main_attrs %}{% endblock %}>{% block content %}{% endblock %}</main>
+{% block scripts %}{% endblock %}
+</body>
+</html>

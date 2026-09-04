@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Ask about your documents</h1>
+<p class="note small">
+  Answers come only from what is in your documents, cited by file and page.
+  {% if index.embedded %}{{ index.embedded }} passage(s) indexed.
+  {% else %}No passages indexed yet — questions fall back to keyword matching.{% endif %}
+  {% if not chat_model %}<strong>TEXT_MODEL is not set, so no answers can be generated.</strong>{% endif %}
+  {% if not embed_model %}<a href="#" id="reindex">Index passages</a> after setting EMBED_MODEL.{% endif %}
+</p>
+
+<div id="thread" class="thread"></div>
+
+<form id="ask" class="ask">
+  <textarea id="q" rows="2" placeholder="Who was at Building 220 on 14 March?"
+            {% if not chat_model %}disabled{% endif %}></textarea>
+  <button type="submit" {% if not chat_model %}disabled{% endif %}>Ask</button>
+</form>
+
+<p class="small">Try: “what happened on 14 March”, “who is connected to Building 220”,
+“summarise what each document says about Smith”.</p>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const thread = document.getElementById('thread');
+const form = document.getElementById('ask');
+const box = document.getElementById('q');
+const history = [];
+
+function bubble(role, text) {
+  const div = document.createElement('div');
+  div.className = 'msg ' + role;
+  div.textContent = text;
+  thread.appendChild(div);
+  thread.scrollTop = thread.scrollHeight;
+  return div;
+}
+
+function renderSources(el, data) {
+  if (!data.pages.length) return;
+  const box = document.createElement('div');
+  box.className = 'sources';
+  box.innerHTML = '<span class="small">read from:</span> ' + data.pages.map(p =>
+    `<a class="src" href="/documents/${encodeURIComponent(p.doc_id)}#page-${p.page_num}"
+        target="_blank">${p.filename} p.${p.page_num}</a>`).join(' ') +
+    (data.relationships ? `<span class="small"> · ${data.relationships} relationship(s) from the graph</span>` : '');
+  el.appendChild(box);
+}
+
+form.addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const question = box.value.trim();
+  if (!question) return;
+  box.value = '';
+  bubble('you', question);
+
+  const wrap = document.createElement('div');
+  wrap.className = 'msg bot';
+  const body = document.createElement('div');
+  body.className = 'body';
+  body.textContent = '…';
+  wrap.appendChild(body);
+  thread.appendChild(wrap);
+  thread.scrollTop = thread.scrollHeight;
+
+  let answer = '';
+  try {
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question, history }),
+    });
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split('\n\n');
+      buffer = parts.pop();
+      for (const part of parts) {
+        const kind = (part.match(/^event: (.+)$/m) || [])[1];
+        const raw = (part.match(/^data: ([\s\S]*)$/m) || [])[1];
+        if (!kind || raw === undefined) continue;
+        let data; try { data = JSON.parse(raw); } catch { continue; }
+        if (kind === 'sources') {
+          renderSources(wrap, data);
+        } else if (kind === 'token') {
+          if (answer === '') body.textContent = '';
+          answer += data;
+          body.textContent = answer;
+          thread.scrollTop = thread.scrollHeight;
+        } else if (kind === 'error') {
+          body.textContent = data;
+          body.classList.add('failed');
+        }
+      }
+    }
+  } catch (err) {
+    body.textContent = 'the request failed: ' + err;
+    body.classList.add('failed');
+  }
+
+  if (answer) {
+    history.push({ role: 'user', content: question });
+    history.push({ role: 'assistant', content: answer });
+  }
+});
+
+box.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); form.requestSubmit(); }
+});
+
+document.getElementById('reindex')?.addEventListener('click', async (ev) => {
+  ev.preventDefault();
+  await fetch('/api/reindex', { method: 'POST' });
+  ev.target.textContent = 'indexing started — reload in a moment';
+});
+</script>
+{% endblock %}

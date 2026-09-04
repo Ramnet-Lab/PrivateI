@@ -1,0 +1,137 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div id="drop" class="drop">
+  <p class="drop-title">Drop documents here, or <label class="link" for="file">choose files</label></p>
+  <p class="drop-hint">PDF, Word (.docx), and images. They start processing as soon as they land.</p>
+  <input type="file" id="file" multiple hidden
+         accept=".pdf,.docx,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.heic,.webp">
+</div>
+
+<div id="notices"></div>
+
+{% if not graph_up %}
+<p class="warn">The graph database is not reachable, so nothing can be linked yet.
+Documents will still be read and transcribed.</p>
+{% endif %}
+
+<p class="row" id="bulk" hidden>
+  <a class="btn" href="/transcripts.zip">Download all transcripts (.zip)</a>
+</p>
+
+<table id="docs">
+  <thead>
+    <tr><th>Document</th><th>Type</th><th>Pages</th><th>Status</th><th></th></tr>
+  </thead>
+  <tbody></tbody>
+</table>
+
+<p class="empty" id="empty" hidden>Nothing uploaded yet.</p>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const drop = document.getElementById('drop');
+const input = document.getElementById('file');
+const notices = document.getElementById('notices');
+
+function notice(text, kind) {
+  const p = document.createElement('p');
+  p.className = 'notice ' + (kind || '');
+  p.textContent = text;
+  notices.appendChild(p);
+  setTimeout(() => p.remove(), 9000);
+}
+
+async function send(files) {
+  if (!files.length) return;
+  const body = new FormData();
+  for (const f of files) body.append('files', f);
+  drop.classList.add('busy');
+  try {
+    const res = await fetch('/upload', { method: 'POST', body });
+    const data = await res.json();
+    if (data.accepted?.length) notice(`${data.accepted.length} file(s) queued`, 'ok');
+    for (const s of data.skipped || []) notice(`${s.filename}: ${s.reason}`, 'bad');
+  } catch (err) {
+    notice('upload failed: ' + err, 'bad');
+  } finally {
+    drop.classList.remove('busy');
+    refresh();
+  }
+}
+
+input.addEventListener('change', () => { send(input.files); input.value = ''; });
+['dragenter', 'dragover'].forEach(e => drop.addEventListener(e, ev => {
+  ev.preventDefault(); drop.classList.add('over');
+}));
+['dragleave', 'drop'].forEach(e => drop.addEventListener(e, ev => {
+  ev.preventDefault(); drop.classList.remove('over');
+}));
+drop.addEventListener('drop', ev => send(ev.dataTransfer.files));
+
+const STATUS_LABEL = {
+  queued: 'waiting', processing: 'working', done: 'done',
+  failed: 'failed', text_only: 'text only', incomplete: 'unreadable',
+};
+
+function row(d) {
+  const tr = document.createElement('tr');
+  const status = document.createElement('td');
+  const label = STATUS_LABEL[d.status] || d.status;
+  status.innerHTML = `<span class="tag ${d.status}">${label}</span>` +
+    (d.progress ? ` <span class="small">${d.progress}</span>` : '') +
+    (d.error ? `<div class="err">${d.error}</div>` : '');
+
+  const actions = document.createElement('td');
+  actions.className = 'actions';
+  actions.innerHTML =
+    `<a class="btn" href="/documents/${d.doc_id}">Open</a>` +
+    (['failed', 'text_only', 'incomplete'].includes(d.status)
+      ? `<button class="btn" data-retry="${d.doc_id}">Retry</button>` : '') +
+    `<button class="btn danger" data-del="${d.doc_id}">Delete</button>`;
+
+  const name = document.createElement('td');
+  name.innerHTML = `<a href="/documents/${d.doc_id}">${d.filename}</a>`;
+  const type = document.createElement('td'); type.textContent = d.media_type;
+  const pages = document.createElement('td'); pages.textContent = d.page_count || '—';
+  tr.append(name, type, pages, status, actions);
+  return tr;
+}
+
+async function refresh() {
+  const res = await fetch('/api/documents');
+  const data = await res.json();
+  const body = document.querySelector('#docs tbody');
+  body.replaceChildren(...data.documents.map(row));
+  document.getElementById('empty').hidden = data.documents.length > 0;
+  document.getElementById('bulk').hidden = data.documents.length === 0;
+  document.getElementById('docs').hidden = data.documents.length === 0;
+  const stats = document.querySelector('.stats');
+  stats.innerHTML =
+    `<span>${data.counts.documents} docs</span><span>${data.counts.pages} pages</span>` +
+    `<span>${data.counts.entities} entities</span><span>${data.counts.assertions} facts</span>`;
+  // Poll only while there is something in flight.
+  return data.counts.processing > 0;
+}
+
+document.addEventListener('click', async (ev) => {
+  const del = ev.target.dataset?.del;
+  const retry = ev.target.dataset?.retry;
+  if (del) {
+    if (!confirm('Delete this document, its pages, and everything extracted from it?')) return;
+    await fetch(`/documents/${del}/delete`, { method: 'POST' });
+    refresh();
+  } else if (retry) {
+    await fetch(`/documents/${retry}/retry`, { method: 'POST' });
+    refresh();
+  }
+});
+
+async function tick() {
+  const busy = await refresh();
+  setTimeout(tick, busy ? 1500 : 6000);
+}
+tick();
+</script>
+{% endblock %}

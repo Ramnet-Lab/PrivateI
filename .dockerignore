@@ -1,0 +1,8 @@
+# The case tree must never enter a build context: it is large and it is evidence.
+data/
+.env
+.git/
+**/__pycache__/
+*.pyc
+.DS_Store
+README.md

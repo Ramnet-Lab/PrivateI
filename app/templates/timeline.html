@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Timeline</h1>
+<p class="note">Every dated statement found in the documents, in order, by when the
+event happened - not when it was written down or reported. Times are shown when a
+document gives one. The quote is what the page actually said.</p>
+
+{% if not rows %}
+<p class="empty">Nothing dated yet. Dates appear here when a document states one
+alongside a fact.</p>
+{% else %}
+<ol class="timeline">
+  {% for r in rows %}
+  <li>
+    <div class="when">
+      {{ r.date[:10] }}
+      {% if r.date|length > 10 %}<span class="at">{{ r.date[11:16] }}</span>{% endif %}
+    </div>
+    <div class="what">
+      <strong>{{ r.subject }}</strong> {{ r.predicate }} <strong>{{ r.object }}</strong>
+      <blockquote>“{{ r.quote }}”</blockquote>
+      <a class="small" href="/documents/{{ r.source_doc }}#page-{{ r.source_page }}">
+        {{ r.source_file }} · page {{ r.source_page }}</a>
+    </div>
+  </li>
+  {% endfor %}
+</ol>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}{{ doc.filename }}{% endblock %}
+{% block content %}
+<h1>{{ doc.filename }}</h1>
+<p class="note small">
+  {{ doc.media_type }} · {{ doc.page_count }} page(s) ·
+  status <span class="tag {{ doc.status }}">{{ doc.status }}</span>
+  {%- if doc.progress %} · {{ doc.progress }}{% endif %}
+</p>
+{% if doc.error %}<p class="warn">{{ doc.error }}</p>{% endif %}
+
+<p class="row">
+  <a class="btn" href="/documents/{{ doc.doc_id }}/transcript.txt">Download transcript</a>
+  <span class="small">every page's text in one file, with the source of each</span>
+</p>
+
+<h2>{{ assertions|length }} fact(s) extracted</h2>
+{% if assertions %}
+<table>
+  <tr><th>Subject</th><th>Relationship</th><th>Object</th><th>Date</th><th>Page</th><th>From the page</th></tr>
+  {% for a in assertions %}
+  <tr>
+    <td>{{ a.subject_name }} <span class="small">{{ a.subject_type }}</span></td>
+    <td>{{ a.predicate }}</td>
+    <td>{{ a.object_name }} <span class="small">{{ a.object_type }}</span></td>
+    <td>{{ a.event_date or "—" }}</td>
+    <td><a href="#page-{{ a.page_num }}">{{ a.page_num }}</a></td>
+    <td class="quote">“{{ a.quote }}”</td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}
+<p class="empty">No facts extracted from this document.</p>
+{% endif %}
+
+<h2>Pages</h2>
+{% for p in pages %}
+<section class="page" id="page-{{ p.page_num }}">
+  <h3>Page {{ p.page_num }}
+    {% if p.text_path %}<a class="small" href="/api/text/{{ doc.doc_id }}/{{ p.page_num }}"
+       download="{{ doc.doc_id }}_page{{ p.page_num }}.txt">download this page</a>{% endif %}
+    <span class="small">
+      {{ p.text_source or "not read" }}
+      {%- if p.ocr_conf is not none %} · OCR confidence {{ "%.0f"|format(p.ocr_conf) }}{% endif %}
+      {%- if p.model %} · {{ p.model }}{% endif %}
+    </span>
+  </h3>
+  {% if p.error %}<p class="warn">{{ p.error }}</p>{% endif %}
+  <div class="page-split">
+    {% if p.image_path %}
+    <a href="/image/{{ doc.doc_id }}/{{ p.page_num }}" target="_blank">
+      <img src="/image/{{ doc.doc_id }}/{{ p.page_num }}" alt="page {{ p.page_num }}">
+    </a>
+    {% endif %}
+    <pre class="text">{{ texts.get(p.page_num, "") }}</pre>
+  </div>
+</section>
+{% endfor %}
+{% endblock %}

@@ -1,0 +1,8 @@
+# The entire data tree is case material.  It never enters version control.
+data/
+.env
+*.pyc
+__pycache__/
+.DS_Store
+.venv/
+docker-compose.override.yml
