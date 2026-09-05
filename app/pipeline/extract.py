@@ -208,6 +208,17 @@ def validate(item: dict, page_text: str, header: str = "") -> tuple[dict | None,
         return None, "quote does not appear on the page"
 
     event_date = normalize_when(item.get("event_date"))
+    basis = str(item.get("event_date_basis") or "").strip().lower()
+    if basis not in ("stated", "month", "approx", "inferred"):
+        basis = "stated" if event_date else ""
+    if not event_date:
+        basis = ""
+
+    # A name that grounded but still carries first person is a leak, not a fact.
+    for role in ("subject_name", "object_name"):
+        low = str(item[role]).lower()
+        if low.startswith(("my ", "our ")) or " my " in f" {low} ":
+            return None, f"{role} contains unresolved first person: {item[role]!r}"
 
     return {
         "subject_type": subject_type,
@@ -216,6 +227,7 @@ def validate(item: dict, page_text: str, header: str = "") -> tuple[dict | None,
         "object_type": object_type,
         "object_name": _clean_name(item["object_name"], object_type),
         "event_date": event_date or None,
+        "event_date_basis": basis or None,
         "quote": quote,
     }, ""
 
@@ -246,7 +258,16 @@ def register_entity(conn, entity_type: str, name: str) -> None:
         (entity_id(entity_type, name), entity_type, name.strip(), utcnow()))
 
 
+def _migrate() -> None:
+    try:
+        with state.tx() as conn:
+            conn.execute("ALTER TABLE triples ADD COLUMN event_date_basis TEXT")
+    except Exception:
+        pass    # column already there
+
+
 def run(doc_id: str, on_progress) -> tuple[int, int]:
+    _migrate()
     rows = state.query(
         """SELECT doc_id, page_num, text_path FROM pages
            WHERE doc_id=? AND text_path IS NOT NULL ORDER BY page_num""", (doc_id,))
@@ -299,12 +320,14 @@ def run(doc_id: str, on_progress) -> tuple[int, int]:
                     conn.execute(
                         """INSERT INTO triples (triple_id, doc_id, page_num,
                              subject_type, subject_name, predicate, object_type,
-                             object_name, event_date, quote, model, created_at)
-                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                             object_name, event_date, event_date_basis, quote,
+                             model, created_at)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
                            ON CONFLICT(triple_id) DO NOTHING""",
                         (tid, doc_id, row["page_num"], clean["subject_type"],
                          clean["subject_name"], clean["predicate"], clean["object_type"],
-                         clean["object_name"], clean["event_date"], clean["quote"],
+                         clean["object_name"], clean["event_date"],
+                         clean["event_date_basis"], clean["quote"],
                          f"{model} ({version})", utcnow()))
                     register_entity(conn, clean["subject_type"], clean["subject_name"])
                     register_entity(conn, clean["object_type"], clean["object_name"])

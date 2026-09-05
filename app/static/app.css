@@ -127,3 +127,11 @@ td.quote { color: var(--muted); font-size: 12px; max-width: 380px; }
 
 .when .at { display: block; font-size: 12px; color: var(--muted);
   font-variant-numeric: tabular-nums; }
+
+/* --- structured allegations ---------------------------------------------- */
+#goal { width: 100%; font-size: 13px; margin: 6px 0 14px; }
+.allegation-row { display: flex; gap: 8px; align-items: flex-start; margin-bottom: 8px; }
+.allegation-row .alg-num { padding-top: 8px; color: var(--muted); min-width: 22px;
+  font-variant-numeric: tabular-nums; }
+.allegation-row textarea { flex: 1; font-size: 13px; }
+#add-allegation { margin: 2px 0 14px 30px; }

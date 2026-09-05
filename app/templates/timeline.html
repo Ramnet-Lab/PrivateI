@@ -13,8 +13,10 @@ alongside a fact.</p>
   {% for r in rows %}
   <li>
     <div class="when">
-      {{ r.date[:10] }}
+      {% if r.basis in ('approx', 'inferred') %}c. {% endif -%}
+      {%- if r.basis == 'month' %}{{ r.date[:7] }}{% else %}{{ r.date[:10] }}{% endif %}
       {% if r.date|length > 10 %}<span class="at">{{ r.date[11:16] }}</span>{% endif %}
+      {% if r.basis and r.basis != 'stated' %}<span class="at">({{ r.basis }})</span>{% endif %}
     </div>
     <div class="what">
       <strong>{{ r.subject }}</strong> {{ r.predicate }} <strong>{{ r.object }}</strong>

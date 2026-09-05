@@ -18,6 +18,7 @@ a conclusion on thin evidence will invent the missing part.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 
 from . import chat, embed, graph, state
@@ -27,7 +28,9 @@ from .model_client import Ollama, default_options, thinking_enabled
 
 log = get_logger("report")
 
-OBJECTIVE_KEY = "cdi_objective"
+OBJECTIVE_KEY = "cdi_objective"          # legacy free-text block
+GOAL_KEY = "cdi_goal"
+ALLEGATIONS_KEY = "cdi_allegations"      # JSON list, one string per allegation
 MAX_PASSAGES = 10
 MAX_RELATIONSHIPS = 40
 
@@ -58,6 +61,25 @@ SYSTEM = (
     "- You do not recommend discipline and you do not speculate about motive."
 )
 
+CONFLICT_TEMPLATE = """You are checking witness accounts against each other. Below are
+extracted facts and passages bearing on one allegation. List ONLY:
+
+1. Direct contradictions - two sources that cannot both be true (different
+   places, different actors, an act both done and not done).
+2. Wording variances - the same remark or threat quoted differently by
+   different witnesses. Quote each version with its source.
+3. Stated observation limits - a witness saying they were far away, had
+   earbuds in, arrived mid-event, or could not see or hear part of it.
+
+Number each item. If there are genuinely none, output exactly: NONE
+
+FACTS:
+{relationships}
+
+PASSAGES:
+{passages}
+"""
+
 ALLEGATION_TEMPLATE = """Write the findings for this one allegation only.
 
 ALLEGATION {number}: {allegation}
@@ -74,13 +96,22 @@ Use this structure exactly:
 
 **Conflicts in the evidence**
 
-<Any place the documents disagree, with both sources. Write "None identified." if there are none.>
+<Adjudicate EVERY candidate listed under CANDIDATE CONFLICTS below: confirm it,
+resolve it with a source, or explain why it is not a real conflict. Add any
+further conflicts you see. Write "None identified." only if the candidate list
+was NONE and you find none yourself.>
 
 **Gaps**
 
-<What the documents do not establish, and what record would settle it. Write "None identified." if there are none.>
+<What the documents do not establish, and the SPECIFIC record that would settle
+it - camera footage, tasker records, badge logs, the certified system report.
+Never call something a gap that a cited finding above already resolves. Write
+"None identified." if there are none.>
 
 ---
+
+CANDIDATE CONFLICTS (from a dedicated cross-witness comparison - adjudicate each):
+{conflicts}
 
 RELATIONSHIPS EXTRACTED FROM THE DOCUMENTS:
 {relationships}
@@ -122,12 +153,30 @@ PERSONS AND ORGANISATIONS EXTRACTED:
 """
 
 
-def get_objective() -> str:
-    return state.get_setting(OBJECTIVE_KEY, "")
+def get_goal() -> str:
+    return state.get_setting(GOAL_KEY, "")
 
 
-def set_objective(text: str) -> None:
-    state.set_setting(OBJECTIVE_KEY, text.strip())
+def get_allegations() -> list[str]:
+    raw = state.get_setting(ALLEGATIONS_KEY, "")
+    if raw:
+        try:
+            items = json.loads(raw)
+            return [str(a).strip() for a in items if str(a).strip()]
+        except json.JSONDecodeError:
+            pass
+    # One-time migration from the legacy free-text block, if one exists.
+    legacy = state.get_setting(OBJECTIVE_KEY, "")
+    return split_allegations(legacy) if legacy else []
+
+
+def set_objective(goal: str, allegations: list[str]) -> None:
+    """The goal and each allegation are separate fields on the page now, so
+    nothing is ever parsed out of prose - a misparse here once relabeled a
+    substantiated allegation as 'insufficient' in the delivered summary."""
+    state.set_setting(GOAL_KEY, (goal or "").strip())
+    cleaned = [str(a).strip() for a in allegations if str(a).strip()]
+    state.set_setting(ALLEGATIONS_KEY, json.dumps(cleaned, ensure_ascii=False))
 
 
 def split_allegations(objective: str) -> list[str]:
@@ -209,12 +258,15 @@ def _entities_block() -> str:
     return "\n".join(out)
 
 
-def generate(objective: str | None = None):
+def generate(goal: str | None = None, allegations: list[str] | None = None):
     """Yield ('status'|'token'|'error'|'done', payload) while writing the report."""
-    objective = (objective if objective is not None else get_objective()).strip()
-    if not objective:
-        yield "error", "No objective has been entered."
+    goal = (goal if goal is not None else get_goal()).strip()
+    allegations = allegations if allegations is not None else get_allegations()
+    allegations = [a.strip() for a in allegations if a.strip()]
+    if not allegations:
+        yield "error", "No allegations have been entered. Add at least one."
         return
+
 
     model = env_str("TEXT_MODEL", "").strip()
     if not model:
@@ -237,16 +289,38 @@ def generate(objective: str | None = None):
 
     options = default_options("TEXT_TEMPERATURE", "TEXT_NUM_CTX",
                               "REPORT_NUM_PREDICT", 1400)
-    allegations = split_allegations(objective)
     body: list[str] = []
     dispositions: list[str] = []
 
     for index, allegation in enumerate(allegations, 1):
-        yield "status", f"Allegation {index} of {len(allegations)}"
+        yield "status", f"Allegation {index} of {len(allegations)}: comparing witnesses"
         passages = embed.search(allegation, k=MAX_PASSAGES)
         facts = chat.relationships_for(allegation, passages)
-        prompt = ALLEGATION_TEMPLATE.format(
+
+        # Conflict detection gets its own pass with nothing else to do. Asked
+        # for alongside findings it rides on chance - one graded run caught a
+        # wording conflict, the next demoted it to a gap. A single-purpose
+        # comparison first, adjudicated inside the findings second, pins it.
+        conflict_candidates = "NONE"
+        try:
+            found = client.generate(
+                model,
+                CONFLICT_TEMPLATE.format(
+                    relationships=_format_relationships(facts),
+                    passages=_format_passages(passages)),
+                system=SYSTEM, options=options, think=thinking_enabled())
+            text = (found.get("response") or "").strip()
+            if text and text.upper() != "NONE":
+                conflict_candidates = text
+        except Exception as exc:
+            log.warning("conflict pass failed for allegation %d: %s", index, exc)
+
+        yield "status", f"Allegation {index} of {len(allegations)}"
+        goal_note = (f"INVESTIGATIVE GOAL (context only - goals are answered, "
+                     f"never 'substantiated'):\n{goal}\n\n" if goal else "")
+        prompt = goal_note + ALLEGATION_TEMPLATE.format(
             number=index, allegation=allegation,
+            conflicts=conflict_candidates,
             relationships=_format_relationships(facts),
             passages=_format_passages(passages))
 
@@ -265,10 +339,14 @@ def generate(objective: str | None = None):
 
         match = re.search(r"\*\*Disposition:\*\*\s*(.+)", section)
         verdict = match.group(1).strip() if match else "not stated"
-        dispositions.append(f"- Allegation {index}: {allegation}\n  Disposition: {verdict}")
+        dispositions.append({"index": index, "allegation": allegation,
+                             "verdict": verdict})
 
     yield "status", "Summary, persons, and timeline"
-    prompt = SUMMARY_TEMPLATE.format(dispositions="\n".join(dispositions),
+    dispo_lines = "\n".join(
+        f"- Allegation {d['index']}: {d['allegation']}\n  Disposition: {d['verdict']}"
+        for d in dispositions)
+    prompt = SUMMARY_TEMPLATE.format(dispositions=dispo_lines,
                                      timeline=_timeline_block(),
                                      entities=_entities_block())
     head = ""
@@ -282,10 +360,20 @@ def generate(objective: str | None = None):
         return
 
     created = utcnow()
+    goal_block = f"## Goal\n\n{goal}\n\n" if goal else ""
+    table = "\n".join(
+        f"| {d['index']} | {d['allegation'][:90]} | **{d['verdict']}** |"
+        for d in dispositions)
+    dispo_table = ("## Dispositions\n\n"
+                   "| # | Allegation | Disposition |\n|---|---|---|\n"
+                   + table +
+                   "\n\n*(This table is assembled mechanically from the finding "
+                   "blocks below; it cannot disagree with them.)*\n\n")
     full = (f"# Report of Investigation\n\n"
             f"Generated {created} from {docs['n'] if docs else 0} document(s) and "
             f"{facts_total['n']} extracted fact(s) using {model}.\n\n"
-            f"## Objective\n\n{objective}\n\n"
+            f"{goal_block}"
+            f"{dispo_table}"
             f"{head.strip()}\n\n## Findings by allegation\n\n"
             + "\n\n".join(body)
             + "\n\n---\n\nEvery statement above is drawn from the uploaded documents "
@@ -293,13 +381,15 @@ def generate(objective: str | None = None):
               "extraction were used throughout; the page images remain the "
               "authority.\n")
 
-    report_id = hashlib.sha256(f"{created}|{objective}".encode()).hexdigest()[:16]
+    objective_record = (goal + "\n" + "\n".join(
+        f"{i}. {a}" for i, a in enumerate(allegations, 1))).strip()
+    report_id = hashlib.sha256(f"{created}|{objective_record}".encode()).hexdigest()[:16]
     with state.tx() as conn:
         conn.execute(
             """INSERT INTO reports (report_id, objective, body, model, documents,
                                     assertions, created_at)
                VALUES (?,?,?,?,?,?,?)""",
-            (report_id, objective, full, model, docs["n"] if docs else 0,
+            (report_id, objective_record, full, model, docs["n"] if docs else 0,
              facts_total["n"], created))
     log.info("report %s written (%d allegation(s))", report_id, len(allegations))
     yield "done", {"report_id": report_id}

@@ -423,6 +423,10 @@ class ModelRunner:
         payload = self._payload(model, self._messages(prompt, system, None),
                                 options, False, stream=True, think=think)
         response = self._post("/chat/completions", payload, stream=True)
+        # Model Runner sends no charset, and requests then decodes text/* as
+        # latin-1 per the HTTP RFC - every em dash becomes "\xe2\x80\x94" read
+        # one byte at a time. The body is UTF-8; say so before decoding.
+        response.encoding = "utf-8"
 
         emitted = ""              # actual answer text sent to the caller
         reasoned = 0              # reasoning fragments observed

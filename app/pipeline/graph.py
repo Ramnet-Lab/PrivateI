@@ -68,7 +68,8 @@ SET o.name = $object_name, o.type = $object_type
 SET o:{object_label}
 MERGE (s)-[r:{rel} {{triple_id: $triple_id}}]->(o)
 SET r.predicate = $predicate, r.source_doc = $doc_id, r.source_page = $page_num,
-    r.quote = $quote, r.event_date = $event_date, r.source_file = $filename,
+    r.quote = $quote, r.event_date = $event_date,
+    r.event_date_basis = $event_date_basis, r.source_file = $filename,
     r.loaded_at = $now
 """
 
@@ -83,7 +84,10 @@ def _load_one(tx, row, subject_id, object_id, subject_name, object_name, filenam
            subject_type=row["subject_type"], object_type=row["object_type"],
            predicate=row["predicate"], triple_id=row["triple_id"],
            doc_id=row["doc_id"], page_num=row["page_num"], quote=row["quote"],
-           event_date=row["event_date"], filename=filename, now=utcnow())
+           event_date=row["event_date"],
+           event_date_basis=(row["event_date_basis"]
+                             if "event_date_basis" in row.keys() else None),
+           filename=filename, now=utcnow())
 
 
 def load(doc_id: str | None = None, on_progress=lambda _m: None) -> int:
@@ -167,7 +171,9 @@ def timeline() -> list[dict]:
             """MATCH (a:Entity)-[r]->(b:Entity)
                WHERE r.triple_id IS NOT NULL AND r.event_date IS NOT NULL
                      AND r.event_date <> ''
-               RETURN r.event_date AS date, a.name AS subject, r.predicate AS predicate,
+               RETURN r.event_date AS date,
+                      r.event_date_basis AS basis,
+                      a.name AS subject, r.predicate AS predicate,
                       b.name AS object, r.source_file AS source_file,
                       r.source_doc AS source_doc, r.source_page AS source_page,
                       r.quote AS quote

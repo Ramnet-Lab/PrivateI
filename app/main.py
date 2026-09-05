@@ -162,26 +162,33 @@ def report_page(request: Request):
         "SELECT report_id, created_at, model, documents, assertions FROM reports "
         "ORDER BY created_at DESC LIMIT 20")
     return templates.TemplateResponse(request, "report.html", {
-        "c": _counts(), "objective": report.get_objective(), "previous": previous,
+        "c": _counts(), "goal": report.get_goal(),
+        "allegations": report.get_allegations(), "previous": previous,
         "chat_model": os.environ.get("TEXT_MODEL", "").strip(),
     })
 
 
 @app.post("/api/objective")
 def api_objective(payload: dict):
-    """The objective is entered once and kept, so the button is one click."""
-    report.set_objective(str(payload.get("objective") or ""))
-    return JSONResponse({"saved": True,
-                         "allegations": len(report.split_allegations(report.get_objective()))})
+    """Goal and allegations arrive as separate fields - nothing is parsed."""
+    allegations = payload.get("allegations") or []
+    if not isinstance(allegations, list):
+        raise HTTPException(status_code=400, detail="allegations must be a list")
+    report.set_objective(str(payload.get("goal") or ""),
+                         [str(a) for a in allegations])
+    return JSONResponse({"saved": True, "allegations": len(report.get_allegations())})
 
 
 @app.post("/api/report")
 def api_report(payload: dict):
-    objective = payload.get("objective")
+    goal = payload.get("goal")
+    allegations = payload.get("allegations")
+    if allegations is not None and not isinstance(allegations, list):
+        raise HTTPException(status_code=400, detail="allegations must be a list")
 
     def events():
         try:
-            for kind, data in report.generate(objective):
+            for kind, data in report.generate(goal, allegations):
                 yield f"event: {kind}\ndata: {json.dumps(data)}\n\n"
         except Exception as exc:
             log.error("report stream failed: %s", exc)

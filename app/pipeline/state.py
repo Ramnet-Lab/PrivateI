@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS triples (
     object_type  TEXT NOT NULL,
     object_name  TEXT NOT NULL,
     event_date   TEXT,
+    event_date_basis TEXT,
     quote        TEXT NOT NULL,
     model        TEXT,
     created_at   TEXT NOT NULL,

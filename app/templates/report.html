@@ -7,9 +7,21 @@
   {% if not chat_model %}<strong>TEXT_MODEL is not set, so no report can be written.</strong>{% endif %}
 </p>
 
-<label class="small" for="objective">Investigative objective — one allegation per line</label>
-<textarea id="objective" rows="7" spellcheck="false"
-  placeholder="1. That on or about 14 May 2026, MSgt Doe used a government vehicle for personal purposes.&#10;2. That MSgt Doe made inappropriate remarks to a subordinate.">{{ objective }}</textarea>
+<label class="small" for="goal">Investigative goal &mdash; what the investigation is to determine (context; goals are answered, not substantiated)</label>
+<textarea id="goal" rows="2" spellcheck="false"
+  placeholder="Determine whether MSgt Doe created a hostile work environment in the fabrication flight.">{{ goal }}</textarea>
+
+<label class="small">Allegations &mdash; one per field; each is answered on its own evidence</label>
+<div id="allegations">
+  {% for a in allegations %}
+  <div class="allegation-row">
+    <span class="alg-num">{{ loop.index }}.</span>
+    <textarea rows="2" spellcheck="false">{{ a }}</textarea>
+    <button type="button" class="btn danger alg-del" title="remove">&times;</button>
+  </div>
+  {% endfor %}
+</div>
+<button type="button" id="add-allegation" class="btn">+ Add allegation</button>
 
 <div class="row">
   <button id="save" class="btn">Save objective</button>
@@ -38,14 +50,49 @@
 
 {% block scripts %}
 <script>
-const objective = document.getElementById('objective');
+const goalBox = document.getElementById('goal');
+const list = document.getElementById('allegations');
 const statusEl = document.getElementById('status');
 const out = document.getElementById('out');
+
+function renumber() {
+  list.querySelectorAll('.allegation-row .alg-num')
+      .forEach((n, i) => { n.textContent = (i + 1) + '.'; });
+}
+function addRow(text) {
+  const row = document.createElement('div');
+  row.className = 'allegation-row';
+  row.innerHTML = '<span class="alg-num"></span>' +
+    '<textarea rows="2" spellcheck="false"></textarea>' +
+    '<button type="button" class="btn danger alg-del" title="remove">\u00d7</button>';
+  row.querySelector('textarea').value = text || '';
+  list.appendChild(row);
+  renumber();
+}
+document.getElementById('add-allegation').addEventListener('click', () => {
+  addRow('');
+  list.lastElementChild.querySelector('textarea').focus();
+});
+list.addEventListener('click', (ev) => {
+  if (ev.target.classList.contains('alg-del')) {
+    ev.target.closest('.allegation-row').remove();
+    renumber();
+  }
+});
+if (!list.querySelector('.allegation-row')) addRow('');
+
+function collect() {
+  return {
+    goal: goalBox.value,
+    allegations: Array.from(list.querySelectorAll('textarea'))
+                      .map(t => t.value.trim()).filter(Boolean),
+  };
+}
 
 document.getElementById('save').addEventListener('click', async () => {
   const res = await fetch('/api/objective', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ objective: objective.value }),
+    body: JSON.stringify(collect()),
   });
   const d = await res.json();
   statusEl.textContent = `saved — ${d.allegations} allegation(s)`;
@@ -61,7 +108,7 @@ document.getElementById('run').addEventListener('click', async () => {
   try {
     const res = await fetch('/api/report', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ objective: objective.value }),
+      body: JSON.stringify(collect()),
     });
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
