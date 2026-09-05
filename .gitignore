@@ -6,3 +6,5 @@ __pycache__/
 .DS_Store
 .venv/
 docker-compose.override.yml
+.auto-update.pid
+auto-update.log

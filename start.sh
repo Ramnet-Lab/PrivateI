@@ -14,9 +14,11 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO"
 
 OPEN_BROWSER=1
+AUTO_UPDATE=1
 for arg in "$@"; do
   case "$arg" in
     --no-browser)  OPEN_BROWSER=0 ;;
+    --no-auto-update) AUTO_UPDATE=0 ;;
     -h|--help)     sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $arg (try --help)" >&2; exit 2 ;;
   esac
@@ -253,6 +255,13 @@ printf '    %s%s%s\n\n' "$B" "$URL" "$Z"
 printf '    Drop documents on the page and they process automatically.\n'
 printf '    Stop with:      %s down\n' "$COMPOSE"
 printf '    See progress:   %s logs -f app\n\n' "$COMPOSE"
+
+# Keep this deployment current: a background watcher pulls any push to the
+# repo and restarts the running containers on the new version. Skip with
+# --no-auto-update, stop later with ./auto-update.sh stop.
+if [ "$AUTO_UPDATE" = 1 ] && [ -d .git ] && [ -x ./auto-update.sh ]; then
+  ./auto-update.sh start 2>/dev/null | tail -1 | sed 's/^/    /' || true
+fi
 
 if [ "$OPEN_BROWSER" = 1 ]; then
   if [ "$PLATFORM" = mac ]; then open "$URL" 2>/dev/null || true
