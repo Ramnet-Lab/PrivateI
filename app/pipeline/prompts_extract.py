@@ -1,6 +1,6 @@
 """Extraction prompt contract.  Versioned like the transcription prompt."""
 
-PROMPT_VERSION = "extract/v5"
+PROMPT_VERSION = "extract/v6"
 
 ENTITY_TYPES = ["PERSON", "ORG", "LOCATION", "EVENT", "DOCUMENT", "CLAIM"]
 
@@ -19,6 +19,8 @@ Entity types: {types}
 Rules:
 - subject_type and object_type must be one of the entity types listed above.
 - predicate is a short lowercase verb phrase, e.g. "attended", "reported to", "was located at", "signed", "stated".
+- ABSENCE IS EVIDENCE. A statement that something did NOT happen, was NOT done, or was NOT observed is a fact and must be extracted with the same care as a positive one. In an investigation these are often the most probative items there are: a check that was not performed, a seal that was not replaced, an email that was never answered, a witness who did not see the thing everyone assumes they saw. Do not skip a sentence because it reports a non-event.
+- OBSERVATION LIMITS ARE FACTS. When a person states a limit on what they could perceive - too far away, view blocked, wearing earbuds, arrived after it started, only heard part of it - extract that as an assertion about them. It is what lets a reader weigh their account against someone with a clearer view.
 - NEGATION IS SACRED. "never replied" must yield predicate "never replied to" - not predicate "replied" with the negation buried in the object, and never a double form like "replied never replied". Flipping a negative statement positive is the worst possible error here: it survives a skim and reverses a finding. The same for "did not", "refused to", "failed to", "denied".
 - BOUNDARIES ARE NOT DATES. "logged zero checks after 11 May" is a statement about the period AFTER that date - 11 May itself is a day the checks WERE logged. Keep after/before/since/until inside the assertion text ("logged zero weekly checks after 2026-05-11") and leave event_date null; event_date is only for something that happened ON a date.
 - Use the name exactly as the text writes it. Do not expand, normalise, or resolve abbreviations - "SSgt Smith" stays "SSgt Smith".

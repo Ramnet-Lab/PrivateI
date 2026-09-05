@@ -95,7 +95,14 @@ def score_negation(key: dict, facts: list[dict]) -> dict:
                       or NEG.search(f["quote"]) for f in related)
         results.append({"trap": trap[:60], "status": "kept" if negated else "POLARITY LOST"})
     lost = [r for r in results if r["status"] == "POLARITY LOST"]
-    return {"traps": results, "lost": len(lost), "pass": not lost}
+    missing = [r for r in results if r["status"] == "not found"]
+    # The threshold is 4/4 verified correct. A trap whose fact was never
+    # extracted is not a pass - nothing was checked. Counting it as one made
+    # this category read green while half of it went unmeasured.
+    return {"traps": results, "kept": len(results) - len(lost) - len(missing),
+            "of": len(results), "polarity_lost": len(lost),
+            "not_extracted": [r["trap"][:40] for r in missing],
+            "pass": not lost and not missing}
 
 
 def score_dates(key: dict, facts: list[dict]) -> dict:
@@ -123,8 +130,22 @@ def score_dates(key: dict, facts: list[dict]) -> dict:
             r"(?!\s+\d)", text)
         if (approx or vague_since) and basis in ("", "stated"):
             upgrades.append(f"{f['predicate']} @ {date} <- {f['quote'][:60]!r}")
-    return {"precision_upgrades": upgrades[:10], "count": len(upgrades),
-            "pass": not upgrades}
+    # Zero upgrades is only half the threshold; the other half is that the
+    # dated events actually made it into the timeline (>=18/23).
+    gold_tl = key.get("timeline_gold", [])
+    found = 0
+    for event in gold_tl:
+        words = [w for w in norm(event["event"]).split() if len(w) > 3][:5]
+        if not words:
+            continue
+        need = max(2, len(words) // 2)
+        hit = any(sum(w in norm(f["quote"] + " " + f["predicate"] + " " +
+                                f["object_name"] + " " + f["subject_name"])
+                      for w in words) >= need for f in facts)
+        found += 1 if hit else 0
+    return {"precision_upgrades": upgrades[:6], "upgrade_count": len(upgrades),
+            "timeline_events": f"{found}/{len(gold_tl)}",
+            "pass": not upgrades and found >= 18}
 
 
 def score_sourcing(key: dict, facts: list[dict]) -> dict:
@@ -201,11 +222,38 @@ def score_facts(key: dict, facts: list[dict]) -> dict:
             "missed": missed, "pass": len(recalled) >= 22}
 
 
+def score_conflicts(key: dict, text: str) -> dict:
+    """Which expected conflicts the report actually surfaced.
+
+    A conflict counts as detected when the report's conflict sections name
+    enough of both positions to show it understood the disagreement - not
+    merely that the words appear somewhere in the document.
+    """
+    sections = re.findall(r"\*\*Conflicts in the evidence\*\*(.*?)(?:\*\*Gaps|\Z)",
+                          text, re.S)
+    blob = norm(" ".join(sections))
+    detected, missed = [], []
+    for c in key.get("expected_conflicts", []):
+        sides = list(c.get("positions", {}).values())
+        hits = 0
+        for side in sides:
+            words = [w for w in norm(side).split() if len(w) > 4][:5]
+            if words and sum(w in blob for w in words) >= max(1, len(words) // 3):
+                hits += 1
+        (detected if hits >= 2 else missed).append(c["id"])
+    return {"detected": detected, "missed": missed,
+            "pass": len(detected) >= 3 and "C1" in detected}
+
+
 def score_report(key: dict, text: str) -> dict:
     """Disposition accuracy, allegation count, and summary/findings agreement."""
     out: dict = {}
-    blocks = re.findall(r"#### Allegation (\d+):(.*?)\*\*Disposition:\*\*\s*(.+)",
-                        text, re.S)
+    # The disposition is a single line. With re.S a trailing (.+) swallows the
+    # rest of the document, so the first block matches once and the other two
+    # are never seen - the check reported one allegation where three exist.
+    blocks = re.findall(
+        r"#### Allegation (\d+):(.*?)\*\*Disposition:\*\*[ \t]*([^\n]+)",
+        text, re.S)
     out["allegation_count"] = len(blocks)
     out["expected_count"] = len(key["allegations"])
     findings = {int(n): d.strip().split("\n")[0] for n, _, d in blocks}
@@ -251,7 +299,9 @@ def main() -> int:
         ("fact_recall", score_facts(key, facts)),
     ]
     if args.report:
-        sections.append(("report", score_report(key, Path(args.report).read_text())))
+        report_text = Path(args.report).read_text()
+        sections.append(("conflict_recall", score_conflicts(key, report_text)))
+        sections.append(("report", score_report(key, report_text)))
 
     failed = 0
     for name, result in sections:

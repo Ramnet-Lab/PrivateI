@@ -71,9 +71,18 @@ extracted facts and passages bearing on one allegation. List ONLY:
 2. Wording variances - the same remark or threat quoted differently by
    different witnesses. Quote each version with its source.
 3. Stated observation limits - a witness saying they were far away, had
-   earbuds in, arrived mid-event, or could not see or hear part of it.
+   earbuds in, arrived mid-event, or could not see or hear part of it. List
+   these even when no one contradicts them: they decide how much weight an
+   account can carry, and an account that cannot see the thing it describes is
+   corroboration at best.
+4. A defence or explanation offered by the person under investigation that the
+   records contradict - "those were my breaks" against a log showing otherwise,
+   "I delegated it" against the person who denies being delegated to. State the
+   defence, then the evidence against it.
+5. An account contradicted by that same person's own words elsewhere.
 
-Number each item. If there are genuinely none, output exactly: NONE
+Number each item. Report every one you find, not only the strongest. If there
+are genuinely none, output exactly: NONE
 
 FACTS:
 {relationships}
@@ -98,10 +107,12 @@ Use this structure exactly:
 
 **Conflicts in the evidence**
 
-<Adjudicate EVERY candidate listed under CANDIDATE CONFLICTS below: confirm it,
-resolve it with a source, or explain why it is not a real conflict. Add any
-further conflicts you see. Write "None identified." only if the candidate list
-was NONE and you find none yourself.>
+<Adjudicate EVERY candidate listed under CANDIDATE CONFLICTS below - one
+numbered entry each: confirm it, resolve it with a source, or explain why it is
+not a real conflict. Include witness observation limits and any defence the
+records contradict; both belong here rather than under Gaps. Add any further
+conflicts you see. Write "None identified." only if the candidate list was NONE
+and you find none yourself.>
 
 **Gaps**
 
