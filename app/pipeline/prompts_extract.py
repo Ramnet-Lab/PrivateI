@@ -1,6 +1,6 @@
 """Extraction prompt contract.  Versioned like the transcription prompt."""
 
-PROMPT_VERSION = "extract/v9"
+PROMPT_VERSION = "extract/v10"
 
 ENTITY_TYPES = ["PERSON", "ORG", "LOCATION", "EVENT", "DOCUMENT", "CLAIM"]
 
@@ -43,6 +43,8 @@ Rules:
   * Preserve the text's own precision. "Around mid May" or "early June" is NOT a date - leave event_date null and let the quote carry the wording. Never sharpen an approximation into a specific day.
   * Resolve a relative expression ("the following Monday", "two days later") ONLY when the passage states the anchor date explicitly; otherwise null.
   * Never guess a year. Use null when the page does not state when it happened.
+  * ONE ASSERTION PER DATE. When a sentence attaches the same predicate to SEVERAL dates - "four advances, dated <d1>, <d2>, <d3> and <d4>", "late on <d1>, <d2> and <d3>", "checks logged <d1> and <d2>" - emit one assertion for EACH date, not a single summary carrying none of them. A ledger line, a log extract or a schedule is a list of separate dated events that happen to share a sentence. One field cannot hold four dates, so a summary silently discards every one of them and the chronology loses the whole series.
+  * A DATE INSIDE YOUR OWN QUOTE IS A DATE YOU HAVE. If the quote you are citing names when the thing happened - "your written complaint of <date>", "the memo of <date>", "the <date> email" - that assertion has an event_date. Leaving it null while the date sits in the quote throws away something the document stated plainly.
 - quote: a span copied character for character from the page text that supports the triple. It must appear in the page text exactly. Do not paraphrase.
 - A statement someone made is a CLAIM: subject is the person, predicate "stated", object_type "CLAIM", and object_name the claim itself. Do not repeat the type inside the name - write "he attended the 0900 staff meeting", not "CLAIM: he attended the 0900 staff meeting".
 - When a line introduces a numbered allegation ("Allegation 2." on its own or after a speaker tag), everything the speaker says after it until the next such line is testimony about THAT allegation. Do not carry a statement across such a line or blend one allegation's answer into another's.
