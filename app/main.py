@@ -310,6 +310,63 @@ def delete_document(doc_id: str):
     return JSONResponse({"deleted": doc_id})
 
 
+def _reset_document(doc_id: str) -> None:
+    """Return a document to the state it was in the moment after upload.
+
+    Retry resumes where processing stopped; re-ingest deliberately does not.
+    Page images, read text, facts, passages and graph edges are all derived
+    from the original file, so all of them are discarded and rebuilt - that is
+    what makes a prompt change or an OCR fix actually reach existing documents
+    instead of only new ones. The uploaded file itself is never touched.
+    """
+    if graph.available():
+        with graph.driver().session() as session:
+            session.run("MATCH ()-[r]->() WHERE r.source_doc = $doc DELETE r",
+                        doc=doc_id)
+            session.run("MATCH (e:Entity) WHERE NOT (e)-[]-() DELETE e")
+
+    with state.tx() as conn:
+        conn.execute("DELETE FROM triples WHERE doc_id=?", (doc_id,))
+        conn.execute("DELETE FROM chunks WHERE doc_id=?", (doc_id,))
+        conn.execute("DELETE FROM pages WHERE doc_id=?", (doc_id,))
+        conn.execute("UPDATE documents SET page_count=0, error=NULL WHERE doc_id=?",
+                     (doc_id,))
+
+    # Drop the rendered pages and read text so ingestion and OCR run again
+    # rather than skipping work that already exists on disk.
+    for directory in (paths.PAGES / doc_id, paths.TEXT / doc_id):
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+@app.post("/documents/{doc_id}/reingest")
+def reingest_document(doc_id: str):
+    if not state.query_one("SELECT 1 AS n FROM documents WHERE doc_id=?", (doc_id,)):
+        raise HTTPException(status_code=404, detail="document not found")
+    _reset_document(doc_id)
+    runner.enqueue(doc_id)
+    log.info("re-ingesting %s from the original file", doc_id)
+    return JSONResponse({"reingesting": doc_id})
+
+
+@app.post("/api/reingest-all")
+def reingest_all():
+    """Rebuild every document from its original file.
+
+    Entities are rebuilt from surviving triples afterwards by the extraction
+    stage; clearing them here as well keeps a stale roster from being offered
+    to chat and reports during the rebuild.
+    """
+    docs = state.query("SELECT doc_id FROM documents ORDER BY uploaded_at")
+    for row in docs:
+        _reset_document(row["doc_id"])
+    with state.tx() as conn:
+        conn.execute("DELETE FROM entities")
+    for row in docs:
+        runner.enqueue(row["doc_id"])
+    log.info("re-ingesting all %d document(s)", len(docs))
+    return JSONResponse({"reingesting": len(docs)})
+
+
 @app.post("/documents/{doc_id}/retry")
 def retry_document(doc_id: str):
     if not state.query_one("SELECT 1 AS n FROM documents WHERE doc_id=?", (doc_id,)):

@@ -17,6 +17,8 @@ Documents will still be read and transcribed.</p>
 
 <p class="row" id="bulk" hidden>
   <a class="btn" href="/transcripts.zip">Download all transcripts (.zip)</a>
+  <button class="btn" id="reingest-all">Re-ingest all</button>
+  <span class="small">re-reads every document from its original file and rebuilds the graph</span>
 </p>
 
 <table id="docs">
@@ -89,6 +91,7 @@ function row(d) {
     `<a class="btn" href="/documents/${d.doc_id}">Open</a>` +
     (['failed', 'text_only', 'incomplete'].includes(d.status)
       ? `<button class="btn" data-retry="${d.doc_id}">Retry</button>` : '') +
+    `<button class="btn" data-reingest="${d.doc_id}" title="re-read this document from the original file">Re-ingest</button>` +
     `<button class="btn danger" data-del="${d.doc_id}">Delete</button>`;
 
   const name = document.createElement('td');
@@ -118,6 +121,7 @@ async function refresh() {
 document.addEventListener('click', async (ev) => {
   const del = ev.target.dataset?.del;
   const retry = ev.target.dataset?.retry;
+  const reingest = ev.target.dataset?.reingest;
   if (del) {
     if (!confirm('Delete this document, its pages, and everything extracted from it?')) return;
     await fetch(`/documents/${del}/delete`, { method: 'POST' });
@@ -125,7 +129,25 @@ document.addEventListener('click', async (ev) => {
   } else if (retry) {
     await fetch(`/documents/${retry}/retry`, { method: 'POST' });
     refresh();
+  } else if (reingest) {
+    if (!confirm('Re-read this document from the original file?\n\n' +
+                 'Its pages, text, extracted facts and graph entries are rebuilt ' +
+                 'from scratch. Takes a few minutes per page.')) return;
+    await fetch(`/documents/${reingest}/reingest`, { method: 'POST' });
+    refresh();
   }
+});
+
+document.getElementById('reingest-all').addEventListener('click', async () => {
+  const n = document.querySelectorAll('#docs tbody tr').length;
+  if (!confirm(`Re-ingest all ${n} document(s)?\n\n` +
+               'Every page is read again and the whole graph is rebuilt from the ' +
+               'original files. This takes a few minutes per page and runs one ' +
+               'document at a time. Use this after changing how documents are read ' +
+               'or how facts are extracted.')) return;
+  notice('re-ingesting everything - watch the status column', 'ok');
+  await fetch('/api/reingest-all', { method: 'POST' });
+  refresh();
 });
 
 async function tick() {

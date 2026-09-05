@@ -90,6 +90,12 @@ vectors whose width does not match rather than mixing them.
 
 - **Documents** — drag and drop, and watch each file's progress. Open one to see
   every page image beside the text read from it, plus the facts extracted.
+  **Re-ingest** rebuilds a document from its original file: pages re-rendered,
+  text read again, facts re-extracted, graph entries replaced. **Re-ingest all**
+  does the same for everything, which is what you want after changing how
+  documents are read or how facts are extracted - otherwise those changes only
+  reach documents uploaded afterwards. It runs one document at a time and takes
+  a few minutes per page; the uploaded files are never modified.
 - **Chat** — ask questions about everything you have uploaded.
 - **Graph** — the whole picture. Click a node for everything it connects to, each
   with the sentence it came from and a link to the source page. Filter by name or
