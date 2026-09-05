@@ -103,7 +103,9 @@ def load(doc_id: str | None = None, on_progress=lambda _m: None) -> int:
     if not rows:
         return 0
 
-    docs = {r["doc_id"]: r for r in
+    # dict(r), not the Row itself: sqlite3.Row supports indexing but has no
+    # .get(), and the miss only shows up at load time.
+    docs = {r["doc_id"]: dict(r) for r in
             state.query("SELECT doc_id, filename, doc_kind, doc_role FROM documents")}
     names = {k: v["filename"] for k, v in docs.items()}
 

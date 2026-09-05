@@ -12,6 +12,8 @@ import traceback
 
 from . import embed, extract, graph, ingest, ocr, state, transcribe
 from .log import get_logger
+from neo4j.exceptions import AuthError, ServiceUnavailable
+
 from .model_client import ModelMissing, ModelNotSet, OllamaError
 
 log = get_logger("runner")
@@ -155,9 +157,17 @@ def process(doc_id: str) -> None:
     progress("building the graph", "linking")
     try:
         graph.load(doc_id, lambda m: progress(m, "linking"))
-    except Exception as exc:
+    except (ServiceUnavailable, AuthError) as exc:
         state.set_status(doc_id, "failed", stage="linking",
                          error=f"could not reach the graph database: {exc}"[:400])
+        return
+    except Exception as exc:
+        # Anything else is a fault in our own loading code. Saying "could not
+        # reach the graph database" for an AttributeError sends the reader to
+        # check Neo4j while the real bug sits in this repo.
+        log.exception("%s: graph load failed", doc_id)
+        state.set_status(doc_id, "failed", stage="linking",
+                         error=f"graph load failed: {type(exc).__name__}: {exc}"[:400])
         return
 
     total = state.query_one(
