@@ -16,7 +16,7 @@ import numpy as np
 from . import paths, state
 from .config import env_str
 from .log import get_logger, utcnow
-from .model_client import Ollama
+from .model_client import DEFAULT_URL, Ollama
 
 
 def _client() -> Ollama:
@@ -28,10 +28,19 @@ def _client() -> Ollama:
     """
     # One Model Runner serves generation and embeddings alike, so this is the
     # same endpoint unless someone deliberately splits them.
-    return Ollama(url=env_str("EMBED_MODEL_URL", "")
-                  or env_str("EMBED_OLLAMA_URL", "")
-                  or env_str("MODEL_URL", "")
-                  or env_str("OLLAMA_URL", ""))
+    # Embeddings stay on this machine whatever the text model is pointed at.
+    # A url is passed explicitly - never None - because a bare client consults
+    # the operator's endpoint override, and passing None here is the one way
+    # document text could reach a remote service through this function. The
+    # local default is the last resort rather than an empty string, so the
+    # value handed over is always an address and never a blank that some later
+    # fallback might fill in.
+    return Ollama(url=(env_str("EMBED_MODEL_URL", "")
+                       or env_str("EMBED_OLLAMA_URL", "")
+                       or env_str("MODEL_URL", "")
+                       or env_str("OLLAMA_URL", "")
+                       or DEFAULT_URL),
+                  allow_override=False)
 
 log = get_logger("embed")
 

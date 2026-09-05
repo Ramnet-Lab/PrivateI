@@ -13,8 +13,8 @@ import re
 
 from rapidfuzz import fuzz
 
-from . import paths, state
-from .config import env_int, env_str
+from . import llm_settings, paths, state
+from .config import env_int
 from .entities import entity_id, normalize
 from .log import get_logger, utcnow
 from .model_client import Ollama, default_options, thinking_enabled
@@ -1629,7 +1629,10 @@ def run(doc_id: str, on_progress) -> tuple[int, int]:
         return 0, 0
 
     client = Ollama()
-    model = client.require_model(env_str("TEXT_MODEL", ""), "TEXT_MODEL")
+    # The name has to come from the same place the endpoint did, or extraction
+    # asks the operator's server for the local model's name.
+    model = client.require_model(llm_settings.effective_text_model(),
+                                 llm_settings.text_model_label())
     options = default_options("TEXT_TEMPERATURE", "TEXT_NUM_CTX",
                               "EXTRACT_NUM_PREDICT", 1200)
 

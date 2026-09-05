@@ -56,8 +56,7 @@ import hashlib
 import json
 import re
 
-from . import chat, embed, evidence, graph, state
-from .config import env_str
+from . import chat, embed, evidence, graph, llm_settings, state
 from .log import get_logger, utcnow
 from .model_client import (Ollama, default_options, random_seed,
                            thinking_enabled)
@@ -594,6 +593,20 @@ E<n> | ELEMENT: <the element>
    MET: <Yes|No> - <one sentence: weighing the two lists against each other, is
      this element more likely true than not>
 
+Where any account bearing on this allegation is secondhand - a speaker
+repeating what another person told them, or describing something they were not
+present for - the section must say so and say what weight it was given, even
+where the finding does not rest on it. An investigation records what it set
+aside as much as what it relied on: a reader who cannot see that the secondhand
+account was considered and discounted cannot tell it from one that was
+overlooked.
+
+Where a finding rests on an account of what somebody else said, rather than on
+what the speaker saw or did or on a record, say so in the finding itself. An
+investigation that cannot tell the two apart cannot weigh them, and a chain of
+report and repetition can look like corroboration while adding nothing: the
+same claim counted twice because two people repeated it.
+
 Every finding here is about the conduct THIS allegation alleges. Where another
 numbered allegation covers a different act - a statement made, a card used, an
 order given - that act is answered in its own section and is not restated as a
@@ -870,21 +883,36 @@ def _format_relationships(facts: list[dict]) -> str:
     ordered = sorted(facts, key=lambda f: (KIND.get(f.get("source_kind") or "unknown", 5),
                                            ROLE.get(f.get("source_role") or "", 2)))
 
+    # Grouped by the day the event happened, precedence preserved inside each
+    # day. A comparison has to put accounts of ONE event beside each other, and
+    # a flat list ordered only by source precedence scatters the three accounts
+    # of a single afternoon among forty other lines. Grouping does not change
+    # what the model is given, only whether the things it must compare are
+    # adjacent - which is the difference between reading a list and having to
+    # hold it all in mind at once.
+    shown = ordered[:MAX_RELATIONSHIPS]
+    days: dict[str, list[dict]] = {}
+    for f in shown:
+        days.setdefault(str(f.get("event_date") or "")[:10], []).append(f)
+
     lines = []
-    for f in ordered[:MAX_RELATIONSHIPS]:
-        when = f" on {f['event_date']}" if f.get("event_date") else ""
-        kind = f.get("source_kind") or "unknown"
-        role = f.get("source_role") or ""
-        if kind == "record":
-            tag = " (RECORD OF EVIDENCE)"
-        elif role == "custodian":
-            tag = " (CUSTODIAN OF THESE RECORDS)"
-        elif role == "subject":
-            tag = " (THE SUBJECT - restatement, not the record)"
-        else:
-            tag = ""
-        lines.append(f"- {f['subject']} {f['predicate']} {f['object']}{when} "
-                     f"[{f['source_file']} p.{f['source_page']}]{tag}")
+    for day in sorted(days, key=lambda d: (d == "", d)):
+        if len(days) > 1:
+            lines.append(f"\n  {day or 'no date given'}:")
+        for f in days[day]:
+            when = f" on {f['event_date']}" if f.get("event_date") else ""
+            kind = f.get("source_kind") or "unknown"
+            role = f.get("source_role") or ""
+            if kind == "record":
+                tag = " (RECORD OF EVIDENCE)"
+            elif role == "custodian":
+                tag = " (CUSTODIAN OF THESE RECORDS)"
+            elif role == "subject":
+                tag = " (THE SUBJECT - restatement, not the record)"
+            else:
+                tag = ""
+            lines.append(f"- {f['subject']} {f['predicate']} {f['object']}{when} "
+                         f"[{f['source_file']} p.{f['source_page']}]{tag}")
     return "\n".join(lines)
 
 
@@ -1190,7 +1218,16 @@ def _foreign_refs(line: str, tagged: list[dict]) -> set[int]:
     return refs
 
 
-CONFLICT_DRAWS = 3
+CONFLICT_DRAWS = 5
+# The comparison pass samples even when the rest of the report is decoded
+# greedily. Its draws are pooled, and pooling only buys something when the
+# draws differ: at temperature 0 five draws are five copies of one, and the
+# pass finds whatever a single greedy comparison finds. Everywhere else the
+# opposite is wanted - a disposition should not move because a token was
+# sampled - so the temperature is raised here and nowhere else. Coverage is
+# the goal in this pass; the precision check downstream is what makes an
+# over-eager draw safe.
+CONFLICT_TEMPERATURE = 0.5
 
 
 def _merge_candidates(blocks: list[str]) -> str:
@@ -1227,8 +1264,116 @@ def _merge_candidates(blocks: list[str]) -> str:
                      for n, item in enumerate(merged, 1))
 
 
-def _drop_foreign_findings(section: str, facts: list[dict],
-                           number: int) -> tuple[str, list[str]]:
+_SECONDHAND = re.compile(
+    r"\b(told me|told him|told her|told them|heard about|heard that|"
+    r"i heard|we heard|said that .{0,40}\bsaid\b|passed on|relayed|"
+    r"secondhand|second hand|not firsthand|nothing firsthand|"
+    r"i was not there|was not present|did not see it)\b", re.I)
+
+
+def _belongs_to_another(line: str, allegations: list[str], index: int) -> int:
+    """The allegation this finding actually describes, when it is not this one.
+
+    A finding can restate another allegation's conduct without quoting any
+    assertion tagged to it - the document it cites may carry no allegation
+    markers at all, which leaves the tag-based check nothing to work with. What
+    is always available is the allegations' own words: a finding that reads as
+    a restatement of allegation 3 belongs in allegation 3's section, and its
+    appearance here counts the same conduct twice.
+
+    Deliberately requires a clear margin. Allegations of one case share
+    vocabulary - the same people, the same dates, the same card - so a narrow
+    lead means the finding is simply about the case, and moving it on that
+    basis would scatter findings between sections at random.
+    """
+    # The citation is not part of what the finding says, and a filename full
+    # of case identifiers matches nothing usefully. Punctuation has to go too:
+    # "2026," and "charges." are the same words as 2026 and charges, and
+    # leaving the comma on made a date match a date and little else.
+    bare = re.sub(r"\[[^\]]*\]", " ", line)
+    words = [w for w in
+             (t.strip(".,;:()\"'") for t in _flat_text(bare).split())
+             if len(w) > 4]
+    if len(words) < 5:
+        return 0
+    scores = []
+    for n, text in enumerate(allegations, 1):
+        terms = {w for w in
+                 (t.strip(".,;:()\"'") for t in _flat_text(text).split())
+                 if len(w) > 4}
+        hit = sum(w in terms for w in words) if terms else 0
+        scores.append((hit / len(words), hit, n))
+    scores.sort(reverse=True)
+    best, best_hits, best_n = scores[0]
+    mine = next((sc for sc, _, n in scores if n == index), 0.0)
+    # A clear margin, and standing on more than a single word. The floor is a
+    # count rather than a share because an allegation is written in a line or
+    # two: every share against so few words is small, and a share-based floor
+    # rejected a finding that matched another allegation on twice as many
+    # words as its own.
+    if best_n != index and best_hits >= 2 and best >= mine * 1.5:
+        return best_n
+    return 0
+
+
+def _secondhand_facts(number: int) -> list[dict]:
+    """Secondhand assertions bearing on this allegation, from the whole corpus.
+
+    Not from the retrieved evidence. Retrieval ranks a passage by how much it
+    resembles the allegation, and "I heard from someone that finance flagged
+    him" resembles almost nothing - so the hearsay a report most needs to say
+    it discounted is exactly the material retrieval leaves behind. What was
+    considered and set aside is a question about the corpus, so it is asked of
+    the corpus.
+    """
+    try:
+        rows = state.query(
+            "SELECT subject_name, quote, doc_id, page_num, allegation_ref "
+            "FROM triples")
+    except Exception:
+        return []
+    out = []
+    for r in rows:
+        ref = str(r["allegation_ref"] or "")
+        if ref and ref.strip() != str(number):
+            continue
+        quote = str(r["quote"] or "")
+        if _SECONDHAND.search(quote):
+            out.append({"subject": r["subject_name"], "quote": quote,
+                        "source_file": r["doc_id"], "source_page": r["page_num"]})
+    return out
+
+
+def _secondhand_note(facts: list[dict]) -> str:
+    """A line recording the secondhand material, or "" when there is none.
+
+    An investigation records what it set aside as much as what it relied on.
+    Where an account of this allegation is one person repeating another's
+    words, a reader has to be told - otherwise a chain of report and
+    repetition reads as corroboration, the same claim counted once for every
+    person who passed it along. Written from the evidence rather than asked
+    for in the prompt, because a disclosure that appears only when the model
+    remembers it is not a disclosure a reader can rely on.
+    """
+    hits = []
+    for f in facts:
+        quote = str(f.get("quote") or "")
+        if _SECONDHAND.search(quote):
+            who = str(f.get("subject") or f.get("subject_name") or "").strip()
+            cite = (f" [{f['source_file']} p.{f['source_page']}]"
+                    if f.get("source_file") else "")
+            hits.append(f"{who}: \"{quote[:110]}\"{cite}" if who else quote[:110])
+    if not hits:
+        return ""
+    listed = "\n".join(f"  - {h}" for h in hits[:4])
+    return ("\n\n*Secondhand accounts considered and given no independent "
+            "weight — an account of what another person said is evidence that "
+            "they said it, not that the thing happened:*\n" + listed + "\n")
+
+
+def _drop_foreign_findings(section: str, facts: list[dict], number: int,
+                           allegations: list[str] | None = None
+                           ) -> tuple[str, list[str]]:
     """Remove findings that restate a different allegation's conduct.
 
     Each allegation is answered in its own section, and the act another
@@ -1248,6 +1393,11 @@ def _drop_foreign_findings(section: str, facts: list[dict],
     kept, dropped = [], []
     for line in section.splitlines():
         refs = _foreign_refs(line, tagged) if line.strip() else set()
+        elsewhere = (_belongs_to_another(line, allegations, number)
+                     if allegations and line.strip() else 0)
+        if elsewhere:
+            dropped.append(line.strip()[:70])
+            continue
         if refs and number not in refs:
             dropped.append(line.strip()[:70])
             continue
@@ -2423,9 +2573,13 @@ def generate(goal: str | None = None, allegations: list[str] | None = None, *,
         yield "error", "No allegations have been entered. Add at least one."
         return
 
-    model = env_str("TEXT_MODEL", "").strip()
+    # The name follows the mode, so that a report written against the
+    # operator's endpoint asks it for a model that endpoint serves.
+    model = llm_settings.effective_text_model()
     if not model:
-        yield "error", "TEXT_MODEL is not set, so no report can be written."
+        yield "error", ("No text model is set, so no report can be written. "
+                        "Choose one on the settings page, or set TEXT_MODEL "
+                        "in .env and restart.")
         return
 
     docs = evidence.corpus_state()
@@ -2456,7 +2610,7 @@ def generate(goal: str | None = None, allegations: list[str] | None = None, *,
 
     client = Ollama()
     try:
-        client.require_model(model, "TEXT_MODEL")
+        client.require_model(model, llm_settings.text_model_label())
     except Exception as exc:
         yield "error", str(exc).splitlines()[0]
         return
@@ -2573,6 +2727,9 @@ def generate(goal: str | None = None, allegations: list[str] | None = None, *,
             try:
                 draw_options = dict(options)
                 draw_options["seed"] = random_seed()
+                draw_options["temperature"] = max(
+                    float(options.get("temperature") or 0.0),
+                    CONFLICT_TEMPERATURE)
                 found = client.generate(
                     model,
                     CONFLICT_TEMPLATE.format(
@@ -2637,7 +2794,10 @@ def generate(goal: str | None = None, allegations: list[str] | None = None, *,
             # beside a SUPPORTING line the scrubber had just emptied, with the
             # disposition already settled on it and nothing to revisit it.
             section, circular = _scrub_allegation_citations(section, document_names)
-            section, foreign = _drop_foreign_findings(section, ctx["facts"], index)
+            section, foreign = _drop_foreign_findings(
+                section, ctx["facts"], index, allegations)
+            section = section.rstrip() + _secondhand_note(
+                _secondhand_facts(index) or ctx["facts"])
             for line in foreign:
                 log.info("allegation %d: dropped a finding belonging to another "
                          "allegation: %s", index, line)

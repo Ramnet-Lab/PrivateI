@@ -22,7 +22,12 @@ def run(doc_id: str, on_progress) -> int:
     if not rows:
         return 0
 
-    client = Ollama()
+    # Transcription is a VISION request and must not follow the text
+    # endpoint. A server chosen for its text model may serve no vision model
+    # at all, and page images are the rawest case material there is. Passing
+    # allow_override=False keeps this on the local runner, socket included,
+    # whatever the text model is pointed at.
+    client = Ollama(allow_override=False)
     model = client.require_model(env_str("VLM_MODEL", ""), "VLM_MODEL")
     options = default_options("VLM_TEMPERATURE", "VLM_NUM_CTX",
                               "TRANSCRIBE_NUM_PREDICT", 2000)

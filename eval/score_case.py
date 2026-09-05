@@ -832,6 +832,17 @@ def score_facts(key: dict, facts: list[dict]) -> dict:
             "needed": need, "missed": missed, "pass": len(recalled) >= need}
 
 
+# Words that carry no signal in a position description. Short words are kept
+# otherwise: "duty", "paid", "June" and "days" each decide something here.
+POSITION_STOPWORDS = {
+    "the", "and", "but", "for", "with", "that", "this", "from", "into", "over",
+    "under", "were", "was", "been", "have", "has", "had", "not", "only",
+    "than", "then", "them", "they", "their", "there", "here", "when", "what",
+    "which", "who", "whom", "would", "could", "should", "about", "after",
+    "before", "both", "each", "more", "most", "some", "such", "very",
+}
+
+
 def score_conflicts(key: dict, text: str) -> dict:
     """Which expected conflicts the report actually surfaced.
 
@@ -849,13 +860,34 @@ def score_conflicts(key: dict, text: str) -> dict:
     if not any(s.strip() for s in sections):
         sections = [subsection(text, "Conflicts")]
     blob = norm(" ".join(sections))
+    whole = norm(text)
     detected, missed = [], []
     for c in key.get("expected_conflicts", []):
         sides = list(c.get("positions", {}).values())
+        if not sides:
+            # A conflict the key states without positions - a hearsay chain
+            # whose point is that it carries no independent weight - cannot be
+            # matched side against side, and scoring it as missed made it
+            # impossible to pass however well the report handled it. It is
+            # matched instead on what the key says the tool should show, read
+            # across the whole report, because that behaviour belongs in the
+            # weighing as often as in a conflicts list.
+            want = [w for w in norm(c.get("expected_resolution", "")).split()
+                    if len(w) > 4][:8]
+            got = sum(word_present(w, whole) for w in want)
+            (detected if want and got >= max(2, len(want) // 3)
+             else missed).append(c["id"])
+            continue
         hits = 0
         for side in sides:
-            words = [w for w in norm(side).split() if len(w) > 4][:5]
-            if words and sum(w in blob for w in words) >= max(1, len(words) // 3):
+            # Words of four letters carry meaning here - duty, days, June,
+            # paid - and dropping them left one position of one conflict with
+            # no matchable words at all, so that conflict could never be
+            # credited however plainly the report stated it.
+            words = [w for w in norm(side).split()
+                     if len(w) > 3 and w not in POSITION_STOPWORDS][:5]
+            if words and sum(word_present(w, blob) for w in words) >= max(
+                    1, len(words) // 3):
                 hits += 1
         (detected if hits >= 2 else missed).append(c["id"])
     thresh = key.get("scoring", {}).get("conflict_recall", {}).get("pass_threshold", "")
@@ -1174,10 +1206,19 @@ def score_credibility(key: dict, text: str) -> dict:
     # behaviour the metric asks for - because the list expected "not
     # firsthand". Testing both halves is a truer reading of the metric than a
     # longer list of synonyms would be.
+    # A report says "hearsay" in more than one way. Naming an account as
+    # carrying no independent weight, or as uncorroborated, identifies it as
+    # secondhand exactly as "not firsthand" does, and a check that only knows
+    # the one vocabulary marks a report that handled the chain correctly as
+    # having ignored it. The two halves stay distinct: this half is about
+    # recognising the account is not self-standing, the half below about
+    # saying that costs it something.
     noticed = any(w in body for w in
                   ("hearsay", "secondhand", "second hand", "firsthand",
                    "first hand", "unnamed", "could not name", "heard about",
-                   "told me", "repeating what"))
+                   "told me", "repeating what", "independent weight",
+                   "no independent", "uncorroborated", "not corroborated",
+                   "learned of it from", "was not present"))
     discounted = any(w in body for w in
                      ("weight", "probative", "cannot rely", "not rely",
                       "limits", "limited", "discount", "corroboration"))
@@ -1551,6 +1592,25 @@ def _ref_from_gold(item: str, gold: list[dict],
     return pooled or None
 
 
+def _page_carries(item: str, tagged: list[dict], number: int) -> bool:
+    """Does a page this finding cites hold assertions tagged to this allegation?"""
+    for doc, page in CITE_PAGE.findall(item):
+        stem = norm(doc).rsplit(".", 1)[0]
+        for f in tagged:
+            if str(f.get("page_num")) != page:
+                continue
+            fid = norm(str(f.get("doc_id") or ""))
+            if not (fid.startswith(stem) or stem.startswith(fid)):
+                continue
+            if number in {int(x) for x
+                          in re.findall(r"\d+", str(f["allegation_ref"]))}:
+                return True
+    return False
+
+
+CITE_PAGE = re.compile(r"\[([^\]\s,]+)[^\]]*?p{1,2}\.?\s*(\d+)[^\]]*\]", re.I)
+
+
 def score_quote_routing(key: dict, text: str, facts: list[dict]) -> dict:
     """A finding under allegation N must rest on evidence bearing on N.
 
@@ -1577,6 +1637,15 @@ def score_quote_routing(key: dict, text: str, facts: list[dict]) -> dict:
             if not belongs:
                 continue
             checked += 1
+            # The extractor's own tagging vetoes a lexical guess. Where the
+            # page this finding cites carries assertions tagged to THIS
+            # allegation, the material is available here whatever gold fact the
+            # wording happened to resemble - and the wording resembles the
+            # wrong one often enough to matter: a finding about a credit card
+            # traced to a fact about rank pressure on the strength of "order"
+            # appearing inside "orders".
+            if _page_carries(item, tagged, n):
+                continue
             if n not in belongs:
                 misrouted.append(f"A{n} rests on {sorted(belongs)} evidence: "
                                  f"{item[:52]}")
@@ -2441,6 +2510,60 @@ SCORER_CONTROLS += [
                    "no official nexus, knew the rules, used the card because "
                    "he was in a financial hole and it was the only one with "
                    "room"}], 3, 0.33) or set())),
+]
+
+
+SCORER_CONTROLS += [
+    ("a conflict stated without positions can still be credited",
+     lambda: score_conflicts(
+         {"expected_conflicts": [{"id": "C5", "positions": {},
+           "expected_resolution": "the hearsay statements carry no independent "
+                                  "weight and the allegation rests on certified "
+                                  "records and the subject admission"}],
+          "scoring": {"conflict_recall": {"pass_threshold": ">=1/1 incl C5"}}},
+         "**Conflicts in the evidence**\n1. TYPE: observation-limit\n"
+         "The hearsay statements carry no independent weight; the allegation "
+         "rests on the certified records and the subject admission."
+     )["detected"] == ["C5"]),
+
+    ("a four-letter word in a position is not discarded",
+     lambda: score_conflicts(
+         {"expected_conflicts": [{"id": "C1", "positions": {
+             "a": "duty days in June", "b": "Saturdays off duty"}}],
+          "scoring": {"conflict_recall": {"pass_threshold": ">=1/1 incl C1"}}},
+         "**Conflicts in the evidence**\n1. TYPE: contradiction\n"
+         "The complaint puts the moves on duty days in June; the witnesses put "
+         "them on Saturdays, off duty."
+     )["detected"] == ["C1"]),
+]
+
+
+SCORER_CONTROLS += [
+    ("an account named as carrying no independent weight counts as hearsay",
+     lambda: score_credibility(
+         {}, "Complainant motive is discussed. Those statements carry no "
+             "independent weight and the allegation rests on the certified "
+             "records.")["pass"]),
+
+    ("weight language with no account identified still fails",
+     lambda: not score_credibility(
+         {}, "Motive is discussed. The evidence carries weight and the limits "
+             "are noted.")["pass"]),
+]
+
+
+SCORER_CONTROLS += [
+    ("the extractor's page tagging vetoes a lexical mis-trace",
+     lambda: _page_carries(
+         "Brandt used the card anyway [D2_11_Interview.pdf p.1].",
+         [{"doc_id": "D2_11_Interview", "page_num": 1, "allegation_ref": "2"}],
+         2)),
+
+    ("a page tagged only elsewhere does not veto",
+     lambda: not _page_carries(
+         "Brandt sent the email [D2_11_Interview.pdf p.2].",
+         [{"doc_id": "D2_11_Interview", "page_num": 2, "allegation_ref": "3"}],
+         2)),
 ]
 
 

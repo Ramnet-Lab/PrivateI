@@ -34,7 +34,7 @@ services:
       # phrasing every time, which also makes a repeated run worthless as a
       # check on itself. Transcription stays at 0 above: a transcript is
       # meant to be verbatim, and sampling there invents readings.
-      TEXT_TEMPERATURE: ${TEXT_TEMPERATURE:-0.2}
+      TEXT_TEMPERATURE: ${TEXT_TEMPERATURE:-0}
       VLM_NUM_CTX: ${VLM_NUM_CTX:-8192}
       TEXT_NUM_CTX: ${TEXT_NUM_CTX:-16384}
       # CPU-only inference is slow enough that the old 600s ceiling cut real

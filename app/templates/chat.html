@@ -5,7 +5,7 @@
   Answers come only from what is in your documents, cited by file and page.
   {% if index.embedded %}{{ index.embedded }} passage(s) indexed.
   {% else %}No passages indexed yet — questions fall back to keyword matching.{% endif %}
-  {% if not chat_model %}<strong>TEXT_MODEL is not set, so no answers can be generated.</strong>{% endif %}
+  {% if not chat_model %}<strong>No text model is set. Choose one on the settings page.</strong>{% endif %}
   {% if not embed_model %}<a href="#" id="reindex">Index passages</a> after setting EMBED_MODEL.{% endif %}
 </p>
 

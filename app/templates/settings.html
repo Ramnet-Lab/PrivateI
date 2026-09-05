@@ -1,0 +1,266 @@
+{% extends "base.html" %}
+{% block title %}Settings{% endblock %}
+{% block content %}
+<h1>Text model</h1>
+
+{# The banner is rendered from what the pipeline resolves right now, not from
+   what is typed in the form below, because the failure this page exists to
+   prevent is an operator believing a choice took effect when only half of it
+   did. It is the first thing on the page for the same reason. #}
+{% if cfg.is_external %}
+<p class="notice {% if not cfg.url.value or not cfg.model.value %}bad{% endif %}" id="in-force">
+  <strong>In force: an external endpoint.</strong>
+  {{ cfg.url.value or 'no address saved' }} serving
+  {{ cfg.model.value or 'no model name' }}.
+  {% if not cfg.url.value or not cfg.model.value %}
+  Every text call fails until both an address and a model name are saved below.
+  {% else %}
+  Document text is sent there.
+  {% endif %}
+</p>
+{% else %}
+<p class="notice {% if cfg.model.value %}ok{% else %}bad{% endif %}" id="in-force">
+  <strong>In force: the prepackaged local model.</strong>
+  {{ cfg.model.value or 'no model name' }} on {{ cfg.url.value }}.
+  {% if cfg.model.value %}
+  Document text stays on this machine.
+  {% else %}
+  No model name is set, so no text call can run.
+  {% endif %}
+</p>
+{% endif %}
+
+<h2>Which model answers</h2>
+
+<p class="row">
+  <label><input type="radio" name="mode" value="local" id="mode-local"
+                {% if not cfg.is_external %}checked{% endif %}>
+    <strong>The prepackaged local model</strong></label>
+</p>
+<p class="small" style="margin: 0 0 12px 22px">
+  Runs on this machine through the built-in model runner, and nothing the model
+  reads leaves the machine.
+  {% if not cfg.is_external %}
+  It uses <code>{{ cfg.model.value or 'no model name' }}</code> at
+  <code>{{ cfg.url.value }}</code> &mdash;
+  <span class="tag">{{ cfg.model.source }}</span>
+  {% endif %}
+</p>
+
+<p class="row">
+  <label><input type="radio" name="mode" value="external" id="mode-external"
+                {% if cfg.is_external %}checked{% endif %}>
+    <strong>An external endpoint</strong></label>
+</p>
+
+{# The three fields belong to this choice, so they are drawn inside it and are
+   disabled while the local model is in force. They are disabled rather than
+   emptied, and they render the saved values in either mode, so moving back and
+   forth between the two choices never looks like - or is - data loss. #}
+<div id="external" style="border-left: 3px solid var(--line); padding-left: 14px;
+     margin: 0 0 8px 22px; {% if not cfg.is_external %}opacity: .55;{% endif %}">
+
+  <p class="warn" id="external-warning" {% if not cfg.is_external %}hidden{% endif %}>
+    <strong>Anything the text model reads leaves this machine while an external
+    endpoint is in force.</strong> That means document passages, the facts extracted
+    from them, and the investigation's allegations are sent to whatever endpoint
+    is configured here. Embeddings are never sent there: they always run against
+    the local model runner, whatever this page is set to. Transcription is not
+    sent there either: it needs a vision model, and it stays on the local runner.
+  </p>
+
+  <p class="note small" id="external-ignored" {% if cfg.is_external %}hidden{% endif %}>
+    These three are ignored while the prepackaged local model is in force.
+    Nothing here is deleted: choose the external endpoint again and they are
+    used as they stand.
+  </p>
+
+  <p class="note small">
+    The endpoint must speak the OpenAI dialect (<code>/chat/completions</code>,
+    <code>/models</code>), and the model name must be the name that endpoint
+    uses for it, which is rarely the name this machine uses.
+  </p>
+
+  <label class="small" for="url">Endpoint URL &mdash; OpenAI-compatible base, e.g. https://host:8000/v1</label>
+  <input id="url" type="text" spellcheck="false" autocomplete="off"
+         {% if not cfg.is_external %}disabled{% endif %}
+         style="width: 100%; max-width: 640px; display: block; margin: 4px 0 4px"
+         placeholder="https://host:8000/v1"
+         value="{{ cfg.stored_url }}">
+  <p class="small" id="url-live" {% if not cfg.is_external %}hidden{% endif %}>In use: {{ cfg.url.value or 'not set' }} &mdash;
+    <span class="tag">{{ cfg.url.source }}</span></p>
+
+  <label class="small" for="model">Text model name</label>
+  <input id="model" type="text" spellcheck="false" autocomplete="off"
+         {% if not cfg.is_external %}disabled{% endif %}
+         style="width: 100%; max-width: 640px; display: block; margin: 4px 0 4px"
+         placeholder="the name that endpoint gives the model"
+         value="{{ cfg.stored_model }}">
+  <p class="small" id="model-live" {% if not cfg.is_external %}hidden{% endif %}>In use: {{ cfg.model.value or 'not set' }} &mdash;
+    <span class="tag">{{ cfg.model.source }}</span></p>
+
+  <label class="small" for="key">API key &mdash; only if the endpoint requires one</label>
+  <input id="key" type="password" spellcheck="false" autocomplete="off"
+         {% if not cfg.is_external %}disabled{% endif %}
+         style="width: 100%; max-width: 640px; display: block; margin: 4px 0 4px"
+         placeholder="leave empty to keep the stored key">
+  <p class="small" id="key-live">Stored key: {{ cfg.api_key.masked or 'none' }} &mdash;
+    <span class="tag">{{ cfg.api_key.source }}</span></p>
+  <p class="small">
+    A key saved here is written in clear text to the local SQLite settings table
+    ({{ db_path }}), the same file that holds the objective and the extracted
+    facts. It is never shown in full on this page or written to the logs.
+  </p>
+</div>
+
+<p class="row">
+  <button id="save" class="btn">Save</button>
+  <button id="test" class="btn">Test the saved endpoint</button>
+  <button id="clear" class="btn danger">Clear endpoint and go local</button>
+  <span id="status" class="small"></span>
+</p>
+<p class="small">
+  Testing asks the saved endpoint what it offers &mdash; or the local runner
+  when no endpoint is saved &mdash; whichever mode is in force, so an address
+  can be checked before it is switched on. It tests what is saved and not what
+  is typed, so save before testing a change, and read the address in the
+  result to see which endpoint answered. Clearing removes the endpoint, model
+  name and key from the settings table and returns to the prepackaged local
+  model.
+</p>
+
+<div id="test-out"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const urlBox = document.getElementById('url');
+const modelBox = document.getElementById('model');
+const keyBox = document.getElementById('key');
+const statusEl = document.getElementById('status');
+const testOut = document.getElementById('test-out');
+const externalRadio = document.getElementById('mode-external');
+const externalBlock = document.getElementById('external');
+const warningEl = document.getElementById('external-warning');
+const ignoredEl = document.getElementById('external-ignored');
+const liveLines = ['url-live', 'model-live'].map(id => document.getElementById(id));
+
+// The mode the server says is in force, captured when the page was rendered.
+// Comparing the radio against it is what lets the page say "not saved yet" out
+// loud, because the operator this page is for had believed a half-made change
+// was live.
+const savedMode = '{{ cfg.mode }}';
+
+function chosenMode() {
+  return externalRadio.checked ? 'external' : 'local';
+}
+
+// The endpoint fields follow the choice: usable and explained under the
+// external endpoint, disabled and marked as ignored under the local model.
+// Disabling never clears them, so flipping between the two costs nothing.
+function applyMode() {
+  const external = chosenMode() === 'external';
+  for (const box of [urlBox, modelBox, keyBox]) box.disabled = !external;
+  externalBlock.style.opacity = external ? '' : '.55';
+  warningEl.hidden = !external;
+  ignoredEl.hidden = external;
+  for (const line of liveLines) line.hidden = !external;
+  statusEl.textContent = chosenMode() === savedMode
+    ? '' : 'not saved yet — press Save';
+}
+
+for (const id of ['mode-local', 'mode-external']) {
+  document.getElementById(id).addEventListener('change', applyMode);
+}
+
+function result(text, kind) {
+  testOut.innerHTML = '';
+  const p = document.createElement('p');
+  p.className = 'notice ' + (kind || '');
+  p.textContent = text;
+  testOut.appendChild(p);
+}
+
+async function post(path, body) {
+  const res = await fetch(path, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => null);
+  if (!res.ok) throw new Error((data && data.detail) || `HTTP ${res.status}`);
+  return data;
+}
+
+// A save reloads the page rather than redrawing it from what was posted. The
+// banner has to state what the pipeline resolves, and a banner drawn from the
+// form would announce an endpoint the server may have stored differently -
+// which is the confusion this page exists to end. The note survives the reload
+// in session storage so the operator still sees that the save landed.
+async function save(payload, note) {
+  statusEl.textContent = 'saving…';
+  try {
+    await post('/api/settings', payload);
+    sessionStorage.setItem('settings-note', note);
+    location.reload();
+  } catch (err) {
+    statusEl.textContent = 'not saved: ' + err.message;
+  }
+}
+
+document.getElementById('save').addEventListener('click', () => {
+  const mode = chosenMode();
+  const payload = { mode: mode };
+  // The endpoint values are posted only when they belong to the choice being
+  // saved. Under the local model the three boxes are disabled, and posting
+  // them would rewrite settings the operator is not editing - an empty box
+  // would clear the endpoint they mean to come back to.
+  if (mode === 'external') {
+    payload.url = urlBox.value.trim();
+    payload.model = modelBox.value.trim();
+    // An empty key box means "leave the stored key alone", not "clear it" -
+    // otherwise every save of an unrelated field would wipe the key, because
+    // the box is never repopulated with the secret.
+    if (keyBox.value) payload.api_key = keyBox.value;
+  }
+  save(payload, mode === 'external'
+       ? 'saved — the external endpoint is in force'
+       : 'saved — the prepackaged local model is in force');
+});
+
+document.getElementById('clear').addEventListener('click', () => {
+  if (!confirm('Clear the endpoint, model name and API key from settings?\n\n' +
+               'The text model returns to the prepackaged local model.')) return;
+  save({ mode: 'local', url: '', model: '', api_key: '' },
+       'cleared — the prepackaged local model is in force');
+});
+
+document.getElementById('test').addEventListener('click', async () => {
+  const button = document.getElementById('test');
+  button.disabled = true;
+  result('testing…');
+  try {
+    const data = await post('/api/settings/test', {});
+    if (data.ok) {
+      const models = (data.models || []);
+      const offered = models.length
+        ? `offers ${models.length} model(s): ${models.join(', ')}`
+        : 'offered no model list';
+      result(`${data.url} reachable — ${offered}`, 'ok');
+    } else {
+      result(data.message || `${data.url} failed`, 'bad');
+    }
+  } catch (err) {
+    result('test failed: ' + err.message, 'bad');
+  } finally {
+    button.disabled = false;
+  }
+});
+
+const note = sessionStorage.getItem('settings-note');
+if (note) {
+  sessionStorage.removeItem('settings-note');
+  statusEl.textContent = note;
+}
+applyMode();
+</script>
+{% endblock %}

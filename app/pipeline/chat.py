@@ -14,8 +14,7 @@ page, so an answer can always be walked back to a page image.
 from __future__ import annotations
 
 
-from . import embed, graph, state
-from .config import env_str
+from . import embed, graph, llm_settings, state
 from .entities import normalize
 from .log import get_logger
 from .model_client import Ollama, default_options, thinking_enabled
@@ -164,10 +163,13 @@ def answer(question: str, history: list[dict] | None = None):
 
     kind is 'sources', 'token', 'error' or 'done'.
     """
-    model = env_str("TEXT_MODEL", "").strip()
+    # The name follows the mode: the operator's model when they have chosen
+    # their own endpoint, the local one otherwise. Reading TEXT_MODEL directly
+    # here is what asked a remote endpoint for the local model's name.
+    model = llm_settings.effective_text_model()
     if not model:
-        yield "error", ("No chat model is set. Put a model name in TEXT_MODEL "
-                        "in .env and restart.")
+        yield "error", ("No chat model is set. Choose one on the settings "
+                        "page, or set TEXT_MODEL in .env and restart.")
         return
 
     try:
@@ -186,7 +188,7 @@ def answer(question: str, history: list[dict] | None = None):
                               "CHAT_NUM_PREDICT", 900)
     client = Ollama()
     try:
-        client.require_model(model, "TEXT_MODEL")
+        client.require_model(model, llm_settings.text_model_label())
         for token in client.stream(model, prompt, system=SYSTEM, options=options,
                                    think=thinking_enabled()):
             yield "token", token

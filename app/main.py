@@ -26,8 +26,8 @@ from fastapi.templating import Jinja2Templates
 APP_DIR = Path(os.environ.get("APP_DIR", "/app"))
 sys.path.insert(0, str(APP_DIR))
 
-from pipeline import (chat, consensus, embed, graph, model_client, paths,  # noqa: E402
-                      report, runner, state)
+from pipeline import (chat, consensus, embed, graph, llm_settings,  # noqa: E402
+                      model_client, paths, report, runner, state)
 from pipeline.log import get_logger, utcnow               # noqa: E402
 
 log = get_logger("app")
@@ -113,7 +113,13 @@ def document_page(request: Request, doc_id: str):
 def chat_page(request: Request):
     return templates.TemplateResponse(request, "chat.html", {
         "c": _counts(), "index": embed.stats(),
-        "chat_model": os.environ.get("TEXT_MODEL", "").strip(),
+        # The name of the text model has to come from the resolver, not from
+        # the environment: when the operator has chosen an external endpoint on
+        # the settings page, the environment still holds the prepackaged name
+        # and this page would name a model the pipeline is not using. The
+        # embedding model is read from the environment on purpose - embeddings
+        # never follow the override and always run on the local runner.
+        "chat_model": llm_settings.effective_text_model(),
         "embed_model": os.environ.get("EMBED_MODEL", "").strip(),
     })
 
@@ -165,7 +171,11 @@ def report_page(request: Request):
     return templates.TemplateResponse(request, "report.html", {
         "c": _counts(), "goal": report.get_goal(),
         "allegations": report.get_allegations(), "previous": previous,
-        "chat_model": os.environ.get("TEXT_MODEL", "").strip(),
+        # Same resolver as the chat page: this value gates the run button, so
+        # reading the environment here would refuse to write a report that a
+        # configured external endpoint could write, or offer to write one with
+        # a model name the pipeline will not use.
+        "chat_model": llm_settings.effective_text_model(),
         # The seed is shown beside each stored report because the pipeline no
         # longer samples at temperature zero: without it a report cannot be
         # regenerated, and the operator would have no way to tell which of two
@@ -288,7 +298,10 @@ def _report_runs(goal, allegations, runs: int, allow_incomplete: bool):
     listing = [{k: m[k] for k in ("n", "seed", "report_id", "error")}
                for m in members]
     created = utcnow()
-    model = os.environ.get("TEXT_MODEL", "").strip()
+    # The model recorded against a stored report must be the model that wrote
+    # it. The environment name is the prepackaged one, which is the wrong
+    # answer whenever the settings page points the text model elsewhere.
+    model = llm_settings.effective_text_model()
     body = consensus.render(summary, listing, created, model)
     yield _sse("token", "\n\n" + body)
 
@@ -335,6 +348,100 @@ def report_markdown(report_id: str):
                              media_type="text/markdown; charset=utf-8",
                              headers={
         "Content-Disposition": f'attachment; filename="report_{report_id}.md"'})
+
+
+# --- text model endpoint ---------------------------------------------------
+#
+# The whole page is a thin shell over pipeline.llm_settings, which owns where
+# the text model actually points and is the only place that reads the stored
+# key. This module deliberately never handles the secret except to hand a
+# newly typed one straight to the writer: effective_config() returns the key
+# already masked, so there is no full key here to leak into a log line, a
+# template or an error message. Each field it returns carries the source it
+# came from as well as its value, because an operator who cannot tell a saved
+# override from an environment default cannot tell whether their change took
+# effect.
+#
+# The mode is the choice that matters most on the page - the prepackaged local
+# model, or the operator's own endpoint - so it travels with every save. It has
+# its own writer in that module rather than riding along with the text fields,
+# because it is the one setting with no box to leave empty.
+
+
+@app.get("/settings", response_class=HTMLResponse)
+def settings_page(request: Request):
+    return templates.TemplateResponse(request, "settings.html", {
+        # effective_config() carries the mode, what each field resolves to
+        # under it, and the saved endpoint values the form has to render even
+        # when the mode is not using them. The page needs no second source.
+        "c": _counts(), "cfg": llm_settings.effective_config(),
+        # Named on the page so the operator knows exactly which file on disk
+        # now holds the API key they just typed.
+        "db_path": str(paths.STATE_DB),
+    })
+
+
+@app.post("/api/settings")
+def api_settings(payload: dict):
+    """Save the mode and the endpoint fields. An empty string clears a field.
+
+    api_key is the exception to "empty clears": the page cannot show the stored
+    key, so it sends the field only when the operator actually typed a new one.
+    A missing api_key therefore means "leave it alone", and only an explicit
+    empty string clears it - otherwise saving a new URL would silently discard
+    the key.
+
+    The page omits url and model entirely while the local model is chosen,
+    which is what keeps a switch back to local from emptying the endpoint the
+    operator means to return to.
+    """
+    url = payload.get("url")
+    model = payload.get("model")
+    api_key = payload.get("api_key")
+    mode = payload.get("mode")
+    for name, value in (("url", url), ("model", model), ("api_key", api_key),
+                        ("mode", mode)):
+        if value is not None and not isinstance(value, str):
+            raise HTTPException(status_code=400, detail=f"{name} must be text")
+    # The mode is checked before anything is written. set_mode() would refuse
+    # an unrecognised value anyway, but refusing it here means a save that is
+    # going to fail does not first store half of itself.
+    if mode is not None and mode not in llm_settings.MODES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"mode must be one of {', '.join(llm_settings.MODES)}")
+    try:
+        # The endpoint values are stored first and the mode is switched after,
+        # so external mode is never in force for the moment before the address
+        # it points at has been written.
+        llm_settings.save_config(url=url, model=model, api_key=api_key)
+        if mode is not None:
+            llm_settings.set_mode(mode)
+    except llm_settings.SettingsError as exc:
+        # What the operator typed cannot be stored as given. This is their
+        # error to fix and the message names the field, so it belongs on the
+        # page rather than in a 500 that reads as a fault in the application.
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log.info("text model settings updated: mode=%s", llm_settings.mode())
+    return JSONResponse({"saved": True,
+                         "config": llm_settings.config_as_dict()})
+
+
+@app.post("/api/settings/test")
+def api_settings_test():
+    """Ask the saved endpoint what it offers, and report what happened.
+
+    The check runs against the saved configuration rather than against anything
+    posted here, so the key never travels back and forth over this route. That
+    is also what lets an address be checked while the local model is still the
+    one in force, which is the order an operator wants: find out that an
+    endpoint serves the model before every extraction depends on it.
+
+    A failure is returned as a failure with its own message: reporting it as
+    anything softer would leave an operator believing a remote model is in use
+    when it is not.
+    """
+    return JSONResponse(llm_settings.check_connectivity())
 
 
 @app.get("/healthz", response_class=PlainTextResponse)
@@ -469,10 +576,20 @@ def _reset_document(doc_id: str) -> None:
 def reingest_document(doc_id: str):
     if not state.query_one("SELECT 1 AS n FROM documents WHERE doc_id=?", (doc_id,)):
         raise HTTPException(status_code=404, detail="document not found")
-    _reset_document(doc_id)
-    runner.enqueue(doc_id, force=True)
-    log.info("re-ingesting %s from the original file", doc_id)
-    return JSONResponse({"reingesting": doc_id})
+    # A run of THIS document is superseded by this request and is abandoned
+    # before anything else happens; a run of any other document is not, and is
+    # left alone. The cancel comes before the reset because the abandoned run
+    # goes on writing pages and assertions until it lets go, and rows deleted
+    # while it is still writing come back as the leavings of a run nobody
+    # wanted. It comes before the enqueue for a stronger reason: cancelling
+    # after the replacement is queued could abort the replacement itself.
+    with runner.paused():
+        aborted = runner.cancel_inflight(doc_id)
+        _reset_document(doc_id)
+        runner.enqueue(doc_id, force=True)
+    log.info("re-ingesting %s from the original file%s", doc_id,
+             " (the run in flight was abandoned)" if aborted else "")
+    return JSONResponse({"reingesting": doc_id, "aborted": aborted})
 
 
 @app.post("/api/reingest-all")
@@ -483,15 +600,28 @@ def reingest_all():
     stage; clearing them here as well keeps a stale roster from being offered
     to chat and reports during the rebuild.
     """
-    docs = state.query("SELECT doc_id FROM documents ORDER BY uploaded_at")
-    for row in docs:
-        _reset_document(row["doc_id"])
-    with state.tx() as conn:
-        conn.execute("DELETE FROM entities")
-    for row in docs:
-        runner.enqueue(row["doc_id"], force=True)
-    log.info("re-ingesting all %d document(s)", len(docs))
-    return JSONResponse({"reingesting": len(docs)})
+    # Every document is about to be rebuilt, so whatever the worker is inside
+    # of is superseded whichever document it belongs to - including the model
+    # call it is blocked in, which is the whole point: that call was made with
+    # the settings this request exists to replace, and until it returns nothing
+    # else can start. Everything here happens in one order for one reason. The
+    # abort is first, before a row is reset, so the run being abandoned is no
+    # longer writing to rows this is about to delete. It is also before
+    # anything is queued, because an abort issued afterwards could land on one
+    # of the new runs instead and leave a document abandoned that the operator
+    # had just asked for.
+    with runner.paused():
+        aborted = runner.cancel_inflight()
+        docs = state.query("SELECT doc_id FROM documents ORDER BY uploaded_at")
+        for row in docs:
+            _reset_document(row["doc_id"])
+        with state.tx() as conn:
+            conn.execute("DELETE FROM entities")
+        for row in docs:
+            runner.enqueue(row["doc_id"], force=True)
+    log.info("re-ingesting all %d document(s)%s", len(docs),
+             f" (abandoned the run of {aborted})" if aborted else "")
+    return JSONResponse({"reingesting": len(docs), "aborted": aborted})
 
 
 @app.post("/documents/{doc_id}/retry")
