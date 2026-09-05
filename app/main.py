@@ -197,7 +197,9 @@ def report_markdown(report_id: str):
     row = state.query_one("SELECT body FROM reports WHERE report_id=?", (report_id,))
     if not row:
         raise HTTPException(status_code=404, detail="report not found")
-    return PlainTextResponse(row["body"], headers={
+    return PlainTextResponse(row["body"],
+                             media_type="text/markdown; charset=utf-8",
+                             headers={
         "Content-Disposition": f'attachment; filename="report_{report_id}.md"'})
 
 
@@ -288,7 +290,11 @@ def delete_document(doc_id: str):
     with state.tx() as conn:
         conn.execute("DELETE FROM triples WHERE doc_id=?", (doc_id,))
         conn.execute("DELETE FROM pages WHERE doc_id=?", (doc_id,))
+        conn.execute("DELETE FROM chunks WHERE doc_id=?", (doc_id,))
         conn.execute("DELETE FROM documents WHERE doc_id=?", (doc_id,))
+    # Entities are derived; a deleted document's people must not survive it.
+    from pipeline import extract as _extract
+    _extract.rebuild_entities()
 
     for directory in (paths.PAGES / doc_id, paths.TEXT / doc_id):
         shutil.rmtree(directory, ignore_errors=True)
@@ -392,7 +398,8 @@ def _transcript_text(doc_id: str) -> tuple[str, str]:
 @app.get("/documents/{doc_id}/transcript.txt", response_class=PlainTextResponse)
 def download_transcript(doc_id: str):
     name, text = _transcript_text(doc_id)
-    return PlainTextResponse(text, headers={
+    return PlainTextResponse(text, media_type="text/plain; charset=utf-8",
+                             headers={
         "Content-Disposition": f'attachment; filename="{name}"'})
 
 
@@ -430,6 +437,8 @@ def page_text(doc_id: str, page_num: int):
     found = paths.under_root(row["text_path"])
     if found is None:
         raise HTTPException(status_code=404, detail="text not found")
-    return PlainTextResponse(found.read_text(encoding="utf-8"), headers={
+    return PlainTextResponse(found.read_text(encoding="utf-8"),
+                             media_type="text/plain; charset=utf-8",
+                             headers={
         "Content-Disposition":
             f'attachment; filename="{doc_id}_page{page_num}.txt"'})

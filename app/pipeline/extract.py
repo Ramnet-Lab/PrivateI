@@ -63,6 +63,34 @@ def _flat(text: str) -> str:
     return _WS.sub(" ", text).strip().casefold()
 
 
+_PRONOUNS = {"i", "me", "you", "he", "she", "they", "we", "the interviewee",
+             "interviewee", "unknown", "the subject", "the witness", "io",
+             "the member", "the investigator"}
+
+
+def name_grounded(name: str, page_text: str, header: str) -> bool:
+    """A hard grounding constraint: no entity without a verbatim source span.
+
+    A graded run produced a person who exists in no document - actions from
+    three different people were hung on an invented name. The prompt now
+    forbids that, but a prompt is a request; this is the enforcement. The name
+    (rank stripped, whitespace collapsed) must appear in the page text or the
+    document header, or the assertion is dropped with the reason recorded.
+    """
+    flat = _WS.sub(" ", str(name or "")).strip().casefold()
+    if not flat or flat in _PRONOUNS:
+        return False
+    haystack = _WS.sub(" ", f"{page_text}\n{header}").casefold()
+    if flat in haystack:
+        return True
+    # "SSgt Smith" is grounded by a page that says just "Smith": strip rank
+    # words and try the bare name, but require something longer than initials.
+    from .entities import RANKS
+    tokens = [t for t in flat.replace(".", " ").split() if t not in RANKS]
+    bare = " ".join(tokens)
+    return bool(bare) and len(bare) >= 3 and bare in haystack
+
+
 def quote_supported(quote: str, page_text: str) -> bool:
     q, t = _flat(quote), _flat(page_text)
     if not q or len(q) < 8:
@@ -155,11 +183,20 @@ def _clean_name(value, entity_type: str) -> str:
     return name[:200]
 
 
-def validate(item: dict, page_text: str) -> tuple[dict | None, str]:
+def validate(item: dict, page_text: str, header: str = "") -> tuple[dict | None, str]:
     for field in ("subject_type", "subject_name", "predicate",
                   "object_type", "object_name", "quote"):
         if not str(item.get(field) or "").strip():
             return None, f"missing {field}"
+
+    # People and organisations must be traceable to ink on a page. CLAIM and
+    # EVENT names are the model's own summarising label, so they are exempt.
+    for role, type_field in (("subject_name", "subject_type"),
+                             ("object_name", "object_type")):
+        etype = str(item.get(type_field) or "").strip().upper()
+        if etype in ("PERSON", "ORG") and not name_grounded(
+                str(item[role]), page_text, header):
+            return None, f"{role} {item[role]!r} does not appear in the document"
 
     subject_type = str(item["subject_type"]).strip().upper()
     object_type = str(item["object_type"]).strip().upper()
@@ -221,6 +258,13 @@ def run(doc_id: str, on_progress) -> tuple[int, int]:
     options = default_options("TEXT_TEMPERATURE", "TEXT_NUM_CTX",
                               "EXTRACT_NUM_PREDICT", 1200)
 
+    # Page 1's opening usually carries the metadata header that names the
+    # interviewee - the anchor for resolving "I" and "you" on every page.
+    header = ""
+    first = paths.under_root(rows[0]["text_path"]) if rows else None
+    if first is not None:
+        header = first.read_text(encoding="utf-8")[:500]
+
     kept = dropped = 0
     for idx, row in enumerate(rows, 1):
         on_progress(f"extracting from page {idx}/{len(rows)} with {model}")
@@ -232,7 +276,8 @@ def run(doc_id: str, on_progress) -> tuple[int, int]:
             continue
 
         for chunk in chunks(page_text):
-            system, user, version = build_prompt(doc_id, row["page_num"], chunk)
+            system, user, version = build_prompt(doc_id, row["page_num"], chunk,
+                                                 header=header)
             try:
                 data = client.generate(model, user, system=system, options=options,
                                        format_json=True, think=thinking_enabled())
@@ -241,9 +286,10 @@ def run(doc_id: str, on_progress) -> tuple[int, int]:
                 continue
 
             for item in parse_response(data.get("response") or ""):
-                clean, reason = validate(item, chunk)
+                clean, reason = validate(item, chunk, header=header)
                 if clean is None:
                     dropped += 1
+                    log.info("%s p%d: dropped (%s)", doc_id, row["page_num"], reason)
                     continue
                 tid = triple_id(doc_id, row["page_num"],
                                 (clean["subject_type"], clean["subject_name"],
@@ -267,6 +313,27 @@ def run(doc_id: str, on_progress) -> tuple[int, int]:
     log.info("%s: %d assertion(s) kept, %d dropped for unsupported quotes",
              doc_id, kept, dropped)
     return kept, dropped
+
+
+def rebuild_entities() -> int:
+    """Recompute the entities table from the triples that still exist.
+
+    Deleting a document used to remove its triples but leave its entity rows,
+    so a person from a deleted file went on being offered to chat and reports
+    as a known name - and a graded run showed the model then hanging other
+    people's actions on that phantom. Entities are derived data; after any
+    deletion they are rebuilt from scratch and re-merged.
+    """
+    with state.tx() as conn:
+        conn.execute("DELETE FROM entities")
+    rows = state.query(
+        "SELECT subject_type, subject_name, object_type, object_name FROM triples")
+    with state.tx() as conn:
+        for r in rows:
+            register_entity(conn, r["subject_type"], r["subject_name"])
+            register_entity(conn, r["object_type"], r["object_name"])
+    auto_merge()
+    return len(rows)
 
 
 def auto_merge(on_progress=lambda _m: None) -> int:

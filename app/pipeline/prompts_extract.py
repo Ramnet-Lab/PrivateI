@@ -1,6 +1,6 @@
 """Extraction prompt contract.  Versioned like the transcription prompt."""
 
-PROMPT_VERSION = "extract/v2"
+PROMPT_VERSION = "extract/v3"
 
 ENTITY_TYPES = ["PERSON", "ORG", "LOCATION", "EVENT", "DOCUMENT", "CLAIM"]
 
@@ -20,6 +20,8 @@ Rules:
 - subject_type and object_type must be one of the entity types listed above.
 - predicate is a short lowercase verb phrase, e.g. "attended", "reported to", "was located at", "signed", "stated".
 - Use the name exactly as the text writes it. Do not expand, normalise, or resolve abbreviations - "SSgt Smith" stays "SSgt Smith".
+- NEVER invent a name. Every subject_name and object_name must appear verbatim somewhere in this page or in the document header below. If you cannot name a person from the text, skip the assertion entirely.
+- Pronoun resolution in interview transcripts: "I", "me", "my" refer to the interviewee named in the document header. "You" inside an interviewer's question also refers to that interviewee. Resolve them to that person's name; never emit "I", "you", "the interviewee", or "unknown" as an entity name, and never substitute some other person's name.
 - event_date: WHEN THE EVENT ITSELF HAPPENED, not when it was written down, reported, or investigated. This distinction matters more than any other field here.
   * A statement dated 8 June describing something that happened on 14 May has event_date 2026-05-14, not the statement's own date.
   * "During an interview on 10 June, Brandt said the remark was made on 22 May" -> the remark has event_date 2026-05-22. Use 10 June only if the assertion is literally about the interview taking place.
@@ -27,6 +29,8 @@ Rules:
   * Convert 24-hour times: "0925" -> T09:25, "1540" -> T15:40, "at 1015" -> T10:15.
   * Resolve relative wording against the date established in the passage: "the same day", "that afternoon", "later that morning" take the date they refer back to.
   * If the text gives a time but no date anywhere, leave event_date null rather than inventing a date.
+  * Preserve the text's own precision. "Around mid May" or "early June" is NOT a date - leave event_date null and let the quote carry the wording. Never sharpen an approximation into a specific day.
+  * Resolve a relative expression ("the following Monday", "two days later") ONLY when the passage states the anchor date explicitly; otherwise null.
   * Never guess a year. Use null when the page does not state when it happened.
 - quote: a span copied character for character from the page text that supports the triple. It must appear in the page text exactly. Do not paraphrase.
 - A statement someone made is a CLAIM: subject is the person, predicate "stated", object_type "CLAIM", and object_name the claim itself. Do not repeat the type inside the name - write "he attended the 0900 staff meeting", not "CLAIM: he attended the 0900 staff meeting".
@@ -43,13 +47,21 @@ Return JSON only, in exactly this shape:
     "quote": "SSgt Smith was present at the 0900 staff meeting"}}
 ]}}
 
+DOCUMENT HEADER (page 1 of this document - identifies the interviewee/author;
+use it to resolve first- and second-person pronouns):
+---
+{header}
+---
+
 PAGE TEXT ({doc_id} page {page_num}):
 ---
 {text}
 ---"""
 
 
-def build(doc_id: str, page_num: int, text: str) -> tuple[str, str, str]:
+def build(doc_id: str, page_num: int, text: str,
+          header: str = "") -> tuple[str, str, str]:
     user = USER_TEMPLATE.format(types=", ".join(ENTITY_TYPES), doc_id=doc_id,
-                                page_num=page_num, text=text)
+                                page_num=page_num, text=text,
+                                header=header.strip() or "(none)")
     return SYSTEM, user, PROMPT_VERSION

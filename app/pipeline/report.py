@@ -46,6 +46,15 @@ SYSTEM = (
     "insufficient. That is a correct and expected answer.\n"
     "- You distinguish what a document records first-hand from what it reports "
     "someone else said. Second-hand accounts are identified as such.\n"
+    "- When the same fact exists in a primary record (a log, a form, a system "
+    "report) and in a person's restatement of it, cite the record and its "
+    "custodian first; the restatement is corroboration, not the source.\n"
+    "- When a witness states a limitation on their own observation - distance, "
+    "an obstructed view, headphones, arriving mid-event - carry that limitation "
+    "into any finding that rests on their account.\n"
+    "- Allegations are substantiated or not; an objective or goal is answered, "
+    "never 'substantiated'. The numbered allegations you are given are the "
+    "complete list - do not invent, split, or renumber them.\n"
     "- You do not recommend discipline and you do not speculate about motive."
 )
 
@@ -130,12 +139,22 @@ def split_allegations(objective: str) -> list[str]:
     text = (objective or "").strip()
     if not text:
         return []
-    parts = re.split(r"(?m)^\s*(?:allegation\s*)?(?:\d+[.)]|[-*•])\s*", text,
-                     flags=re.IGNORECASE)
-    items = [p.strip() for p in parts if p.strip()]
-    if len(items) <= 1:
-        items = [line.strip() for line in text.splitlines() if line.strip()]
-    return items or [text]
+    # Numbered items are the allegations; anything before the first number is
+    # the objective's preamble - context, never Allegation 1. Treating the
+    # preamble as an allegation shifts every number down and misfiles findings
+    # under the wrong heading, which a graded run demonstrated in practice.
+    marker = re.compile(r"(?m)^\s*(?:allegation\s*)?(?:\d+[.)]|[-*•])\s+", re.IGNORECASE)
+    matches = list(marker.finditer(text))
+    if matches:
+        items = []
+        for i, m in enumerate(matches):
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+            body = text[m.end():end].strip()
+            if body:
+                items.append(body)
+        if items:
+            return items
+    return [line.strip() for line in text.splitlines() if line.strip()] or [text]
 
 
 def _format_relationships(facts: list[dict]) -> str:
