@@ -89,6 +89,13 @@ _HONORIFIC = re.compile(
     r"gen|mr|mrs|ms|miss|dr|sir|madam|civ)\b", re.I)
 
 
+# Rank is a closed set in this domain, and a phrase carrying one is a
+# person rather than a job title.
+_RANK = re.compile(
+    r"\b(?:msgt|ssgt|tsgt|smsgt|cmsgt|sra|amn|a1c|capt|maj|lt|col|gen|"
+    r"sgt|mr|mrs|ms|dr|det|ofc|sfc|cpl|pvt)\b\.?", re.I)
+
+
 def article_role(name: str, page_text: str, header: str) -> bool:
     """True when the document refers to this name with a definite article.
 
@@ -101,14 +108,45 @@ def article_role(name: str, page_text: str, header: str) -> bool:
     text = str(name or "").strip()
     if not text or _HONORIFIC.match(text):
         return False
-    blob = _WS.sub(" ", f"{page_text} {header}").lower()
+    # A name with no capital letter is not a name in English. "everybody",
+    # "the crew", "someone" - all reach here as PERSON candidates and none of
+    # them is a person.
+    if not any(ch.isupper() for ch in text):
+        return True
+
+    # The head of a person's name is capitalised: "MSgt Brandt", "de la Cruz".
+    # When the last word is lowercase the phrase is a common noun with a name
+    # attached to it - "Ox's neighbors", "Brandt's crew" - which names a group
+    # around the person, not the person.
+    head = text.split()[-1] if text.split() else text
+    if head and head[0].islower():
+        return True
+
+    blob = _WS.sub(" ", f"{page_text} {header}")
+    lower = blob.lower()
     bare = text.lower()
-    with_article = sum(blob.count(f"{a} {bare}") for a in ("the", "a", "an"))
+
+    # An appositive after a name is a title: "Capt Dana M. Reyes, Investigating
+    # Officer". The person is the name before the comma; the phrase after it
+    # says what they do.
+    # Guarded: an attendance line ("Present: Capt Reyes, MSgt Brandt") puts a
+    # real person after a comma too. A title is multi-word, carries no rank,
+    # and has no initial - so those three conditions separate "Reyes,
+    # Investigating Officer" from "Reyes, MSgt Brandt" without a list of job
+    # titles. Wrongly discarding a real person is worse than keeping a phantom.
+    if (len(text.split()) >= 2
+            and not _RANK.search(text)
+            and not re.search(r"\b[A-Z]\.", text)
+            and re.search(r"[A-Z][a-z]+\.?\s+[A-Z][\w.]*[^,\n]*,\s*"
+                          + re.escape(text), blob)):
+        return True
+
+    with_article = sum(lower.count(f"{a} {bare}") for a in ("the", "a", "an"))
     if not with_article:
         return False
     # Count mentions that are NOT preceded by an article; a name used bare even
     # once is being used as a name.
-    total = blob.count(bare)
+    total = lower.count(bare)
     return with_article >= total
 
 
