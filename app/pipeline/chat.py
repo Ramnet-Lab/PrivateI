@@ -95,6 +95,8 @@ def relationships_for(question: str, passages: list[dict]) -> list[dict]:
                 "subject": subject, "predicate": fact["predicate"], "object": obj,
                 "event_date": fact.get("event_date"),
                 "source_file": fact.get("source_file") or fact.get("source_doc"),
+                "source_kind": fact.get("source_kind"),
+                "source_role": fact.get("source_role"),
                 "source_doc": fact.get("source_doc"),
                 "source_page": fact.get("source_page"),
                 "quote": fact.get("quote"),

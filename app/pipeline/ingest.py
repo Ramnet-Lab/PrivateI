@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from pathlib import Path
 
 import cv2
@@ -151,6 +152,78 @@ def ingest_image(src: Path, doc_id: str, on_progress) -> int:
     return 1
 
 
+# What a document IS decides how much its contents are worth. A system log is
+# the record; a person describing that log from memory is a restatement of it.
+# Citing the restatement when the record is in evidence is the sourcing error
+# that survives every prose instruction, so the kind is stored as data.
+_KIND_PATTERNS = [
+    ("record", re.compile(
+        r"\b(log|logbook|ledger|register|report generated|system report|"
+        r"proxy log|access log|audit|export|records? of|certificate|"
+        r"calibration record|maintenance record|orders|form \d)", re.I)),
+    ("appointment", re.compile(
+        r"\b(appointment (memo|letter)|memorandum for|appointed to conduct|"
+        r"investigating officer is appointed)", re.I)),
+    ("statement", re.compile(
+        r"\b(sworn statement|statement of|affidavit|under oath)", re.I)),
+    ("interview", re.compile(
+        r"\b(interview|transcript|q:|question:|interviewee)", re.I)),
+    ("notes", re.compile(r"\b(working notes|io notes|investigator notes)", re.I)),
+]
+
+
+def classify_kind(filename: str, first_text: str) -> str:
+    """Best-effort document kind from the filename and its opening text."""
+    blob = f"{filename}\n{first_text[:1200]}"
+    for kind, pattern in _KIND_PATTERNS:
+        if pattern.search(blob):
+            return kind
+    return "unknown"
+
+
+# Who is speaking decides how much weight their account carries about a given
+# thing. A custodian describing the system they administer is the source for
+# what that system recorded; the subject repeating the same figure from memory
+# is a restatement of it. Both are interviews, so document kind cannot tell
+# them apart - the speaker's relationship to the evidence has to be captured.
+_ROLE_PATTERNS = [
+    ("subject", re.compile(
+        r"\b(subject of (this|the) investigation|you are the subject|"
+        r"subject interview|as the subject)\b", re.I)),
+    ("custodian", re.compile(
+        r"\b(custodian|network administrator|system administrator|"
+        r"records? (manager|monitor|keeper)|calibration monitor|"
+        r"i (maintain|administer|keep|run) the (log|system|records?)|"
+        r"i pulled the (log|report)|i am responsible for the records?)\b", re.I)),
+    ("complainant", re.compile(
+        r"\b(complainant|i filed (a|the) complaint|i reported (him|her|them|it) to)\b",
+        re.I)),
+    ("supervisor", re.compile(
+        r"\b(section chief|flight chief|supervisor|i supervise|"
+        r"in my capacity as (his|her|their) supervisor)\b", re.I)),
+]
+
+
+def classify_role(filename: str, first_text: str) -> str:
+    """The interviewee's relationship to the evidence, best effort.
+
+    Text is weighted over the filename: a file named for a role is a
+    convention this pipeline cannot rely on, but a person saying what they do
+    is present in any real interview.
+    """
+    for role, pattern in _ROLE_PATTERNS:
+        if pattern.search(first_text[:2500]):
+            return role
+    stem = filename.lower()
+    for role, hints in (("subject", ("subject",)),
+                        ("custodian", ("custodian", "admin", "monitor", "records")),
+                        ("complainant", ("complainant",)),
+                        ("supervisor", ("supervisor", "sectionchief", "chief"))):
+        if any(h in stem for h in hints):
+            return role
+    return "witness"
+
+
 def run(doc_id: str, on_progress) -> int:
     doc = state.query_one("SELECT * FROM documents WHERE doc_id=?", (doc_id,))
     src = paths.RAW / doc["filename"]
@@ -163,8 +236,18 @@ def run(doc_id: str, on_progress) -> int:
     else:
         page_count = ingest_image(src, doc_id, on_progress)
 
+    first_text = ""
+    first = paths.transcript_txt(doc_id, 1)
+    if first.exists():
+        first_text = first.read_text(encoding="utf-8")[:1200]
+    kind = classify_kind(doc["filename"], first_text)
+    role = classify_role(doc["filename"], first_text) if kind in (
+        "interview", "statement", "unknown") else ""
+
     with state.tx() as conn:
-        conn.execute("UPDATE documents SET page_count=? WHERE doc_id=?",
-                     (page_count, doc_id))
+        conn.execute(
+            "UPDATE documents SET page_count=?, doc_kind=?, doc_role=? WHERE doc_id=?",
+            (page_count, kind, role, doc_id))
+    log.info("%s: %s%s", doc_id, kind, f" / {role}" if role else "")
     log.info("%s: %d page(s)", doc_id, page_count)
     return page_count

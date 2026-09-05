@@ -70,6 +70,15 @@ _PRONOUNS = {"i", "me", "you", "he", "she", "they", "we", "the interviewee",
 # A role is a position, not a person. Extracting "Equipment Test Craftsman" as
 # a PERSON creates a node that can silently collect another person's actions -
 # the same class of harm as an invented name, reached by a different route.
+# Plurals and collectives - "Airmen", "the crew", "the shop" - name groups,
+# not people. Same harm as a job title: a node that accumulates the actions of
+# whichever individual the model could not pin down.
+_COLLECTIVE = re.compile(
+    r"^(the\s+)?(airmen|airman|personnel|members|member|troops|crew|shop|team|"
+    r"staff|squadron|flight|section|unit|others|everyone|someone|somebody|"
+    r"people|witnesses|subordinates|coworkers|colleagues|leadership|"
+    r"supervisors|management)$", re.I)
+
 _ROLE_WORDS = re.compile(
     r"\b(administrator|technician|craftsman|journeyman|apprentice|chief|"
     r"supervisor|monitor|manager|officer|commander|custodian|operator|"
@@ -88,6 +97,8 @@ def looks_like_role(name: str) -> bool:
     and role vocabulary are removed.
     """
     text = str(name or "").strip()
+    if _COLLECTIVE.match(text):
+        return True
     if _HONORIFIC.match(text):
         return False
     if not _ROLE_WORDS.search(text):
@@ -291,11 +302,14 @@ def register_entity(conn, entity_type: str, name: str) -> None:
 
 
 def _migrate() -> None:
-    try:
-        with state.tx() as conn:
-            conn.execute("ALTER TABLE triples ADD COLUMN event_date_basis TEXT")
-    except Exception:
-        pass    # column already there
+    for stmt in ("ALTER TABLE triples ADD COLUMN event_date_basis TEXT",
+                 "ALTER TABLE documents ADD COLUMN doc_kind TEXT",
+                 "ALTER TABLE documents ADD COLUMN doc_role TEXT"):
+        try:
+            with state.tx() as conn:
+                conn.execute(stmt)
+        except Exception:
+            pass    # column already there
 
 
 def run(doc_id: str, on_progress) -> tuple[int, int]:

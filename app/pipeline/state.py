@@ -25,6 +25,8 @@ CREATE TABLE IF NOT EXISTS documents (
     sha256      TEXT NOT NULL UNIQUE,
     size_bytes  INTEGER NOT NULL,
     media_type  TEXT NOT NULL,
+    doc_kind    TEXT,
+    doc_role    TEXT,
     page_count  INTEGER NOT NULL DEFAULT 0,
     uploaded_at TEXT NOT NULL,
     started_at  TEXT,

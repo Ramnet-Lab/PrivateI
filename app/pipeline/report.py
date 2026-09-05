@@ -51,7 +51,9 @@ SYSTEM = (
     "someone else said. Second-hand accounts are identified as such.\n"
     "- When the same fact exists in a primary record (a log, a form, a system "
     "report) and in a person's restatement of it, cite the record and its "
-    "custodian first; the restatement is corroboration, not the source.\n"
+    "custodian first; the restatement is corroboration, not the source. Facts "
+    "marked (RECORD OF EVIDENCE) come from the record itself - cite those "
+    "before any interview that repeats the same figure.\n"
     "- When a witness states a limitation on their own observation - distance, "
     "an obstructed view, headphones, arriving mid-event - carry that limitation "
     "into any finding that rests on their account.\n"
@@ -209,11 +211,35 @@ def split_allegations(objective: str) -> list[str]:
 def _format_relationships(facts: list[dict]) -> str:
     if not facts:
         return "(none found for this allegation)"
+    # Records first, then statements, then everything else - so the primary
+    # source is what the model reads at the top of the list, not merely what it
+    # was told to prefer. A person restating a log is corroboration; the log is
+    # the evidence.
+    KIND = {"record": 0, "appointment": 1, "statement": 2, "interview": 3,
+            "notes": 4, "unknown": 5}
+    # Within interviews the speaker's relationship to the evidence decides
+    # precedence: the custodian of a system is the source for what it recorded,
+    # and the subject repeating that figure is the furthest from it.
+    ROLE = {"custodian": 0, "complainant": 1, "supervisor": 1, "witness": 2,
+            "": 2, "subject": 3}
+    ordered = sorted(facts, key=lambda f: (KIND.get(f.get("source_kind") or "unknown", 5),
+                                           ROLE.get(f.get("source_role") or "", 2)))
+
     lines = []
-    for f in facts[:MAX_RELATIONSHIPS]:
+    for f in ordered[:MAX_RELATIONSHIPS]:
         when = f" on {f['event_date']}" if f.get("event_date") else ""
+        kind = f.get("source_kind") or "unknown"
+        role = f.get("source_role") or ""
+        if kind == "record":
+            tag = " (RECORD OF EVIDENCE)"
+        elif role == "custodian":
+            tag = " (CUSTODIAN OF THESE RECORDS)"
+        elif role == "subject":
+            tag = " (THE SUBJECT - restatement, not the record)"
+        else:
+            tag = ""
         lines.append(f"- {f['subject']} {f['predicate']} {f['object']}{when} "
-                     f"[{f['source_file']} p.{f['source_page']}]")
+                     f"[{f['source_file']} p.{f['source_page']}]{tag}")
     return "\n".join(lines)
 
 

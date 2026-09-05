@@ -70,11 +70,13 @@ MERGE (s)-[r:{rel} {{triple_id: $triple_id}}]->(o)
 SET r.predicate = $predicate, r.source_doc = $doc_id, r.source_page = $page_num,
     r.quote = $quote, r.event_date = $event_date,
     r.event_date_basis = $event_date_basis, r.source_file = $filename,
+    r.source_kind = $source_kind, r.source_role = $source_role,
     r.loaded_at = $now
 """
 
 
-def _load_one(tx, row, subject_id, object_id, subject_name, object_name, filename):
+def _load_one(tx, row, subject_id, object_id, subject_name, object_name, filename,
+              source_kind="unknown", source_role=""):
     query = LOAD.format(
         subject_label=row["subject_type"] if row["subject_type"] in ENTITY_LABELS else "ENTITY",
         object_label=row["object_type"] if row["object_type"] in ENTITY_LABELS else "ENTITY",
@@ -87,7 +89,8 @@ def _load_one(tx, row, subject_id, object_id, subject_name, object_name, filenam
            event_date=row["event_date"],
            event_date_basis=(row["event_date_basis"]
                              if "event_date_basis" in row.keys() else None),
-           filename=filename, now=utcnow())
+           filename=filename, source_kind=source_kind,
+           source_role=source_role, now=utcnow())
 
 
 def load(doc_id: str | None = None, on_progress=lambda _m: None) -> int:
@@ -100,8 +103,9 @@ def load(doc_id: str | None = None, on_progress=lambda _m: None) -> int:
     if not rows:
         return 0
 
-    names = {r["doc_id"]: r["filename"] for r in
-             state.query("SELECT doc_id, filename FROM documents")}
+    docs = {r["doc_id"]: r for r in
+            state.query("SELECT doc_id, filename, doc_kind, doc_role FROM documents")}
+    names = {k: v["filename"] for k, v in docs.items()}
 
     loaded = 0
     with driver().session() as session:
@@ -114,7 +118,9 @@ def load(doc_id: str | None = None, on_progress=lambda _m: None) -> int:
             object_id = resolve_canonical(entity_id(row["object_type"], row["object_name"]))
             session.execute_write(_load_one, row, subject_id, object_id,
                                   display_name(subject_id), display_name(object_id),
-                                  names.get(row["doc_id"], row["doc_id"]))
+                                  names.get(row["doc_id"], row["doc_id"]),
+                                  (docs.get(row["doc_id"]) or {}).get("doc_kind") or "unknown",
+                                  (docs.get(row["doc_id"]) or {}).get("doc_role") or "")
             with state.tx() as conn:
                 conn.execute("UPDATE triples SET loaded_at=? WHERE triple_id=?",
                              (utcnow(), row["triple_id"]))

@@ -133,18 +133,25 @@ def score_sourcing(key: dict, facts: list[dict]) -> dict:
     docs = {d["doc_id"]: d["file_match"] for d in key["documents"]}
     results = []
     for trap in key.get("trap_inventory", {}).get("sourcing", []):
-        ids = re.findall(r"\b(\d{2})\b", trap)
-        if len(ids) < 2:
+        # Read the primary from the phrase that names it. Taking the last
+        # two-digit number instead made this check pass by testing the
+        # SECONDARY document - a green light for the exact failure it exists
+        # to catch.
+        m = re.search(r"primary source is doc\s*(\d+)", trap, re.I)
+        if not m:
             continue
-        primary = ids[-1]
+        primary = m.group(1).zfill(2)
         words = [w for w in norm(trap).split() if len(w) > 5][:3]
         related = [f for f in facts
                    if sum(w in norm(f["quote"]) for w in words) >= 1]
         cited = {f["doc_id"] for f in related}
         want = docs.get(primary, "")
-        ok = any(want and want.lower()[:12] in c.lower() for c in cited)
-        results.append({"trap": trap[:60], "cited_primary": ok,
-                        "docs": sorted(c[:26] for c in cited)[:3]})
+        # Match on the document number prefix, which is what actually
+        # identifies it ("09_Interview_Liu..." -> "09").
+        ok = bool(want) and any(c.startswith(primary + "_") for c in cited)
+        results.append({"trap": trap[:58], "primary_doc": want[:26],
+                        "cited_primary": ok,
+                        "cited": sorted(c[:24] for c in cited)[:3]})
     passed = sum(1 for r in results if r["cited_primary"])
     return {"checks": results, "pass": bool(results) and passed == len(results)}
 
