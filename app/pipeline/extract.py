@@ -301,19 +301,7 @@ def register_entity(conn, entity_type: str, name: str) -> None:
         (entity_id(entity_type, name), entity_type, name.strip(), utcnow()))
 
 
-def _migrate() -> None:
-    for stmt in ("ALTER TABLE triples ADD COLUMN event_date_basis TEXT",
-                 "ALTER TABLE documents ADD COLUMN doc_kind TEXT",
-                 "ALTER TABLE documents ADD COLUMN doc_role TEXT"):
-        try:
-            with state.tx() as conn:
-                conn.execute(stmt)
-        except Exception:
-            pass    # column already there
-
-
 def run(doc_id: str, on_progress) -> tuple[int, int]:
-    _migrate()
     rows = state.query(
         """SELECT doc_id, page_num, text_path FROM pages
            WHERE doc_id=? AND text_path IS NOT NULL ORDER BY page_num""", (doc_id,))

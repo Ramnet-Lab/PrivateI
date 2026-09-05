@@ -156,19 +156,27 @@ def ingest_image(src: Path, doc_id: str, on_progress) -> int:
 # the record; a person describing that log from memory is a restatement of it.
 # Citing the restatement when the record is in evidence is the sourcing error
 # that survives every prose instruction, so the kind is stored as data.
+# Order matters more than the patterns do. A transcript that discusses a log is
+# still a transcript, so the structural kinds - anything with questions and
+# answers, a sworn preamble, a memorandum heading - are tested BEFORE the
+# content words that suggest a record. Testing record first classified an
+# interview as a log because the witness talked about logs.
 _KIND_PATTERNS = [
-    ("record", re.compile(
-        r"\b(log|logbook|ledger|register|report generated|system report|"
-        r"proxy log|access log|audit|export|records? of|certificate|"
-        r"calibration record|maintenance record|orders|form \d)", re.I)),
-    ("appointment", re.compile(
-        r"\b(appointment (memo|letter)|memorandum for|appointed to conduct|"
-        r"investigating officer is appointed)", re.I)),
     ("statement", re.compile(
-        r"\b(sworn statement|statement of|affidavit|under oath)", re.I)),
+        r"\b(sworn statement|statement of witness|affidavit|"
+        r"under (oath|penalty of perjury))", re.I)),
     ("interview", re.compile(
-        r"\b(interview|transcript|q:|question:|interviewee)", re.I)),
-    ("notes", re.compile(r"\b(working notes|io notes|investigator notes)", re.I)),
+        r"(^|\n)\s*(q|question|io)\s*[:.]|\b(interview (of|with|transcript)|"
+        r"transcript of interview|interviewee\s*[:.])", re.I)),
+    ("appointment", re.compile(
+        r"\b(memorandum for|appointment (memo|letter)|"
+        r"appointed to conduct|investigating officer is appointed)", re.I)),
+    ("notes", re.compile(
+        r"\b(working notes|io notes|investigator(?:'s)? notes)", re.I)),
+    ("record", re.compile(
+        r"\b(log|logbook|ledger|register|system report|report generated|"
+        r"proxy log|access log|audit trail|export|certificate|"
+        r"calibration record|maintenance record|orders|form \d)", re.I)),
 ]
 
 

@@ -127,9 +127,26 @@ def connect() -> sqlite3.Connection:
     return conn
 
 
+# Columns added after the first release. Applied at startup, before any stage
+# runs: a migration living inside one stage is a migration the stages before it
+# do not get - which is how ingest came to write a column extraction had not
+# created yet.
+MIGRATIONS = [
+    "ALTER TABLE triples ADD COLUMN event_date_basis TEXT",
+    "ALTER TABLE documents ADD COLUMN doc_kind TEXT",
+    "ALTER TABLE documents ADD COLUMN doc_role TEXT",
+]
+
+
 def init_db() -> None:
     # executescript() commits any open transaction, so it cannot run inside tx().
-    connect().executescript(SCHEMA)
+    conn = connect()
+    conn.executescript(SCHEMA)
+    for stmt in MIGRATIONS:
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError:
+            pass    # already applied
 
 
 @contextmanager
