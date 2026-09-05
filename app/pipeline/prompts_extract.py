@@ -1,6 +1,6 @@
 """Extraction prompt contract.  Versioned like the transcription prompt."""
 
-PROMPT_VERSION = "extract/v4"
+PROMPT_VERSION = "extract/v5"
 
 ENTITY_TYPES = ["PERSON", "ORG", "LOCATION", "EVENT", "DOCUMENT", "CLAIM"]
 
@@ -22,6 +22,7 @@ Rules:
 - NEGATION IS SACRED. "never replied" must yield predicate "never replied to" - not predicate "replied" with the negation buried in the object, and never a double form like "replied never replied". Flipping a negative statement positive is the worst possible error here: it survives a skim and reverses a finding. The same for "did not", "refused to", "failed to", "denied".
 - BOUNDARIES ARE NOT DATES. "logged zero checks after 11 May" is a statement about the period AFTER that date - 11 May itself is a day the checks WERE logged. Keep after/before/since/until inside the assertion text ("logged zero weekly checks after 2026-05-11") and leave event_date null; event_date is only for something that happened ON a date.
 - Use the name exactly as the text writes it. Do not expand, normalise, or resolve abbreviations - "SSgt Smith" stays "SSgt Smith".
+- A JOB TITLE IS NOT A PERSON. "Civilian Network Administrator", "the section chief", "Equipment Test Craftsman", "the flight chief" are roles. If the text names the person holding the role, use the name; if it does not, skip the assertion rather than making the title into a person. Roles may be used as the OBJECT of a role assertion ("PERSON: Ana Reyes" / "holds the position of" / "CLAIM: Equipment Test Craftsman").
 - NEVER invent a name. Every subject_name and object_name must appear verbatim somewhere in this page or in the document header below. If you cannot name a person from the text, skip the assertion entirely.
 - Pronoun resolution in interview transcripts: "I", "me", "my" refer to the interviewee named in the document header. "You" inside an interviewer's question also refers to that interviewee. Resolve them to that person's name; never emit "I", "you", "the interviewee", or "unknown" as an entity name, and never substitute some other person's name.
 - event_date_basis: how the date is known - "stated" (the text gives the exact day), "month" (only a month is given: use the month, day 01, basis "month"), "approx" ("around mid May": leave event_date null OR give the month with basis "approx"), "inferred" (you resolved a relative expression from an explicit anchor). Omit or null when event_date is null.

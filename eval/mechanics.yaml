@@ -1,0 +1,192 @@
+# Capability fixtures: each isolates ONE mechanic that accurate investigation
+# depends on, in a document small enough that only that mechanic can fail.
+#
+# The point is generality. A fixture asserting "expect TSgt Morgan" tests memory
+# of one case; a fixture asserting "a negated statement must not appear as a
+# positive assertion" tests a property every case needs. The names here are
+# throwaway on purpose - swap them and every assertion still holds.
+#
+# Assertions run against extracted triples:
+#   forbid_entity / require_entity      regex over entity names
+#   entity_roster_max / _min            count of distinct PERSON entities
+#   forbid_predicate / require_predicate regex over predicates (polarity traps)
+#   forbid_date (+ where_predicate)     no triple may carry this event_date
+#   forbid_exact_stated_date            no day-precise date claimed as 'stated'
+#   require_quote_substr                some quote must contain this text
+#
+# Regenerate with eval/build_fixtures.py; do not hand-edit quoting.
+- id: negation_polarity
+  mechanic: negation
+  why: A negated statement rendered positive reverses a finding and survives a skim.
+  text: 'SWORN STATEMENT
+
+    Name: SSgt Robin Vance
+
+    Organization: 12th Test Squadron
+
+
+    I sent the request to TSgt Dale Kerr on 3 June 2026.
+
+    TSgt Kerr never replied to that email.
+
+    '
+  assert:
+  - forbid_predicate: ^replied to$
+  - require_predicate: never|did not|no reply
+- id: negation_boundary
+  mechanic: negation
+  why: An 'after DATE' phrase describes the period following it, not an event on it.
+  text: 'SWORN STATEMENT
+
+    Name: MSgt Ana Reyes
+
+    Organization: 12th Test Squadron
+
+
+    The maintenance log shows zero weekly checks after 11 May 2026.
+
+    The 11 May 2026 check was completed and signed.
+
+    '
+  assert:
+  - forbid_date: '2026-05-11'
+    where_predicate: zero|no |failed|missing
+- id: coref_first_person
+  mechanic: coreference
+  why: First person must resolve to the document's interviewee, never become an entity.
+  text: 'SWORN STATEMENT
+
+    Name: SrA Jamie Okonkwo
+
+    Organization: 12th Test Squadron
+
+
+    I reported the fault to the section chief on 9 June 2026.
+
+    I was working the night shift that week.
+
+    '
+  assert:
+  - forbid_entity: ^(i|me|my|the interviewee|unknown)$
+  - require_entity: Okonkwo
+- id: coref_second_person
+  mechanic: coreference
+  why: The word you in an investigator question refers to the interviewee.
+  text: 'SWORN STATEMENT
+
+    Name: TSgt Morgan Blake
+
+    Organization: 12th Test Squadron
+
+
+    Q: Did you sign the written counseling on 20 June 2026?
+
+    A: Yes, I signed it that afternoon.
+
+    '
+  assert:
+  - forbid_entity: ^you$
+  - require_entity: Blake
+- id: coref_embedded_quote
+  mechanic: coreference
+  why: Words a witness quotes belong to the person quoted, not to the witness.
+  text: 'SWORN STATEMENT
+
+    Name: A1C Sam Ortiz
+
+    Organization: 12th Test Squadron
+
+
+    SSgt Lena Park called me, quote, useless, in front of the shop on 14 July 2026.
+
+    '
+  assert:
+  - forbid_predicate: ^(is|was) useless$
+  - require_entity: Park
+- id: name_collision
+  mechanic: coreference
+  why: A first name equal to another person's surname must not merge them.
+  text: 'SWORN STATEMENT
+
+    Name: SrA Morgan Feld
+
+    Organization: 12th Test Squadron
+
+
+    I saw TSgt Casey Morgan at the bench on 14 July 2026.
+
+    TSgt Morgan was speaking to A1C Diaz.
+
+    '
+  assert:
+  - require_entity: Feld
+  - require_entity: Casey Morgan|TSgt Morgan
+  - entity_roster_min: 3
+- id: phantom_grounding
+  mechanic: grounding
+  why: No person may be created who appears nowhere in the source.
+  text: 'SWORN STATEMENT
+
+    Name: SSgt Priya Raman
+
+    Organization: 12th Test Squadron
+
+
+    I briefed the flight chief on 2 June 2026 about the missing tool.
+
+    The flight chief directed a full inventory the same day.
+
+    '
+  assert:
+  - entity_roster_max: 2
+  - forbid_entity: Alvarez|Smith|Johnson|Miller
+- id: date_precision_month
+  mechanic: date_precision
+  why: Since March is month precision; day 01 asserted as exact is fabrication.
+  text: 'SWORN STATEMENT
+
+    Name: TSgt Alex Nunez
+
+    Organization: 12th Test Squadron
+
+
+    I have been the section NCOIC since March 2026.
+
+    '
+  assert:
+  - forbid_exact_stated_date: true
+    where_predicate: NCOIC|has been|served|been
+- id: date_precision_approx
+  mechanic: date_precision
+  why: Around mid May must not sharpen into a specific day.
+  text: 'SWORN STATEMENT
+
+    Name: SSgt Dana Whitlock
+
+    Organization: 12th Test Squadron
+
+
+    Around mid May 2026 I asked SrA Cole to take over the weekly checks.
+
+    '
+  assert:
+  - forbid_date: '2026-05-15'
+  - forbid_date: '2026-05-01'
+- id: hearsay_attribution
+  mechanic: hearsay
+  why: Secondhand knowledge must be attributed, not asserted as direct observation.
+  text: 'SWORN STATEMENT
+
+    Name: MSgt Terry Voll
+
+    Organization: 12th Test Squadron
+
+
+    A1C Reed told me that SSgt Lane shouted at him on 14 July 2026.
+
+    I did not see the exchange myself.
+
+    '
+  assert:
+  - require_predicate: told|stated|reported|said
+  - require_quote_substr: told me

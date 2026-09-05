@@ -1,0 +1,218 @@
+{
+  "meta": {
+    "case_id": "CDI-2026-04",
+    "purpose": "Ground truth answer key for investigation automation eval. Fictional training data.",
+    "version": "1.0",
+    "standard_of_proof": "preponderance_of_evidence",
+    "disposition_labels": ["SUBSTANTIATED", "NOT_SUBSTANTIATED"],
+    "note": "Any other disposition label emitted by the tool (e.g. insufficient evidence) is a schema violation."
+  },
+
+  "documents": [
+    {"doc_id": "05", "file_match": "05_Interview_Ellis_Complainant", "interviewee": "ellis", "status": "witness_complainant"},
+    {"doc_id": "06", "file_match": "06_Interview_Duran_Coworker", "interviewee": "duran", "status": "witness"},
+    {"doc_id": "07", "file_match": "07_Interview_Pike_Bystander", "interviewee": "pike", "status": "witness"},
+    {"doc_id": "08", "file_match": "08_Interview_Okafor_CalMonitor", "interviewee": "okafor", "status": "records_custodian"},
+    {"doc_id": "09", "file_match": "09_Interview_Liu_NetworkAdmin", "interviewee": "liu", "status": "records_custodian_civilian"},
+    {"doc_id": "10", "file_match": "10_Interview_Voss_SectionChief", "interviewee": "voss", "status": "witness_supervisor"},
+    {"doc_id": "11", "file_match": "11_Interview_Morgan_Subject", "interviewee": "morgan", "status": "subject"}
+  ],
+
+  "entities": {
+    "expected_person_count": 8,
+    "persons": [
+      {"id": "morgan", "canonical": "TSgt Casey L. Morgan", "role": "NCOIC, Equipment Test Section", "aliases": ["Morgan", "TSgt Morgan", "the NCOIC", "the subject", "I (doc 11 answers)", "you (doc 11 IO questions)", "he (context dependent)"]},
+      {"id": "ellis", "canonical": "A1C Jordan T. Ellis", "role": "Equipment Test Technician, complainant", "aliases": ["Ellis", "A1C Ellis", "the complainant", "I (doc 05 answers)"]},
+      {"id": "duran", "canonical": "SSgt Alex P. Duran", "role": "Equipment Test Craftsman", "aliases": ["Duran", "SSgt Duran", "I (doc 06 answers)"]},
+      {"id": "pike", "canonical": "SrA Morgan K. Pike", "role": "Equipment Test Technician, bystander", "aliases": ["Pike", "SrA Pike", "I (doc 07 answers)"], "coref_trap": "First name Morgan collides with subject surname Morgan. Tool must not merge pike and morgan."},
+      {"id": "okafor", "canonical": "TSgt Devin A. Okafor", "role": "Squadron Calibration Program Monitor", "aliases": ["Okafor", "TSgt Okafor", "I (doc 08 answers)"]},
+      {"id": "liu", "canonical": "Ms. Karen J. Liu", "role": "GS-12 Network Administrator, CFP", "aliases": ["Liu", "Ms. Liu", "I (doc 09 answers)"]},
+      {"id": "voss", "canonical": "MSgt Taylor R. Voss", "role": "Flight Section Chief", "aliases": ["Voss", "MSgt Voss", "I (doc 10 answers)"]},
+      {"id": "novak", "canonical": "Capt Riley A. Novak", "role": "Investigating Officer", "aliases": ["the IO", "IO (all docs, question speaker)"]}
+    ],
+    "forbidden_entities_examples": ["Alvarez", "Smith", "any name not in persons list"],
+    "peripheral_mentions_not_required": ["Lt Col Dana R. Whitfield (appointing authority, plan doc only)", "PMEL individual (unnamed)", "Ellis's dad (unnamed)"]
+  },
+
+  "allegations": [
+    {
+      "id": "A1",
+      "label": "dereliction_of_duty",
+      "text_key": "willfully failing to complete required weekly calibration checks, 1 May to 31 Jul 2026, Article 92 UCMJ",
+      "expected_disposition": "SUBSTANTIATED",
+      "required_elements": [
+        {"element": "duty_existed", "gold_fact_ids": ["F01", "F02"]},
+        {"element": "subject_knew_of_duty", "gold_fact_ids": ["F02", "F08", "F09"]},
+        {"element": "duty_not_performed", "gold_fact_ids": ["F03", "F04", "F05", "F06"]},
+        {"element": "willfulness_or_neglect", "gold_fact_ids": ["F08", "F09", "F10", "F11"]}
+      ],
+      "primary_source_doc": "08"
+    },
+    {
+      "id": "A2",
+      "label": "misuse_of_government_resources",
+      "text_key": "government computer and duty hours used for personal online resale business, 1 May to 31 Jul 2026, DoD 5500.07-R JER",
+      "expected_disposition": "SUBSTANTIATED",
+      "required_elements": [
+        {"element": "personal_business_exists", "gold_fact_ids": ["F13"]},
+        {"element": "government_system_used", "gold_fact_ids": ["F14", "F15", "F17", "F18"]},
+        {"element": "during_duty_hours", "gold_fact_ids": ["F15", "F16"]},
+        {"element": "beyond_authorized_personal_use", "gold_fact_ids": ["F15", "F16", "F19"]}
+      ],
+      "primary_source_doc": "09"
+    },
+    {
+      "id": "A3",
+      "label": "unprofessional_conduct",
+      "text_key": "berating and publicly demeaning A1C Ellis on or about 14 Jul 2026, AFI 1-1",
+      "expected_disposition": "SUBSTANTIATED",
+      "required_elements": [
+        {"element": "conduct_occurred", "gold_fact_ids": ["F20", "F21", "F22", "F25"]},
+        {"element": "demeaning_language", "gold_fact_ids": ["F21", "F22", "F23", "F25"]},
+        {"element": "public_setting", "gold_fact_ids": ["F20", "F24"]},
+        {"element": "subject_admission", "gold_fact_ids": ["F25", "F26"]}
+      ],
+      "primary_source_doc": "05"
+    }
+  ],
+
+  "gold_facts": [
+    {"id": "F01", "text": "OI 21-101 para 3.2 requires weekly operational verification every Monday on six bench test sets", "primary_doc": "08", "corroborating_docs": ["06"], "allegations": ["A1"]},
+    {"id": "F02", "text": "Morgan is designated responsible individual by appointment letter signed 18 Mar 2026", "primary_doc": "08", "corroborating_docs": ["10", "11"], "allegations": ["A1"]},
+    {"id": "F03", "text": "Thirteen Mondays 1 May to 31 Jul 2026; tracker shows 4 completed, 9 with no entry", "primary_doc": "08", "corroborating_docs": [], "allegations": ["A1"], "numeric": {"mondays": 13, "completed": 4, "missed": 9}},
+    {"id": "F04", "text": "Of 4 completed: Duran logged 26 May and 23 Jun; Morgan logged 4 May and 11 May", "primary_doc": "08", "corroborating_docs": ["06"], "allegations": ["A1"], "negation_trap": "Morgan logged checks ON 4 and 11 May; he logged ZERO checks AFTER 11 May. Tools must not emit 'zero checks on 11 May'."},
+    {"id": "F05", "text": "July physical inspection: four of six sets still carried tamper seals dated in May", "primary_doc": "08", "corroborating_docs": [], "allegations": ["A1"], "note": "Defeats performed-but-not-logged theory"},
+    {"id": "F06", "text": "Model 3 signal generator found out of tolerance by Ellis 8 Jun, turned in to PMEL 9 Jun; PMEL eval: weekly check would likely have caught drift 2 to 3 weeks earlier", "primary_doc": "08", "corroborating_docs": ["05", "11"], "allegations": ["A1"], "date_notes": {"user_discovery": "2026-06-08", "turn_in": "2026-06-09"}},
+    {"id": "F07", "text": "Okafor reconciliation emails 2 Jun, 12 Jun, 16 Jun to Morgan (Voss copied); Morgan never replied", "primary_doc": "08", "corroborating_docs": ["10"], "allegations": ["A1"], "negation_trap": "Fact is absence of reply. Must not become 'Morgan replied'."},
+    {"id": "F08", "text": "Voss verbal counseling 3 Jun 2026, documented as MFR same day", "primary_doc": "10", "corroborating_docs": ["11"], "allegations": ["A1"]},
+    {"id": "F09", "text": "Voss written counseling 17 Jun 2026, signed by Morgan", "primary_doc": "10", "corroborating_docs": ["11"], "allegations": ["A1"]},
+    {"id": "F10", "text": "Checks did not resume after either counseling through 31 Jul", "primary_doc": "10", "corroborating_docs": ["08"], "allegations": ["A1"]},
+    {"id": "F11", "text": "Morgan admits checks fell off, cites workload, calls post 17 Jun record indefensible", "primary_doc": "11", "corroborating_docs": [], "allegations": ["A1"]},
+    {"id": "F12", "text": "Morgan claims verbal delegation to Duran around mid May", "primary_doc": "11", "corroborating_docs": [], "allegations": ["A1"], "date_precision": "approx_mid_month", "date_trap": "Must not render as exact 2026-05-15"},
+    {"id": "F13", "text": "Morgan operates sneaker resale business, approx three years", "primary_doc": "11", "corroborating_docs": [], "allegations": ["A2"]},
+    {"id": "F14", "text": "Duran saw resale platform content on Morgan's screen at least a dozen times May to Jul; June prepaid shipping label with personal return address", "primary_doc": "06", "corroborating_docs": [], "allegations": ["A2"]},
+    {"id": "F15", "text": "Certified proxy logs: 1,340 requests to resale and shipping domains across 47 of 61 duty days, clustered 0900-1130 and 1300-1500", "primary_doc": "09", "corroborating_docs": ["11"], "allegations": ["A2"], "numeric": {"requests": 1340, "active_days": 47, "duty_days": 61}, "sourcing_trap": "Primary citation must be doc 09 (records custodian), not the subject's restatement in doc 11"},
+    {"id": "F16", "text": "Recurring label service hits around 1430 most duty days; Morgan admits printing labels before 1500 post office run", "primary_doc": "09", "corroborating_docs": ["11", "06"], "allegations": ["A2"]},
+    {"id": "F17", "text": "Voss walked in 25 Jun 2026, saw storefront dashboard; Morgan claimed break", "primary_doc": "10", "corroborating_docs": [], "allegations": ["A2"]},
+    {"id": "F18", "text": "Ellis saw sneaker selling page once and boxes/bubble mailers at desk; Pike saw boxes carried out afternoons (never saw screen)", "primary_doc": "05", "corroborating_docs": ["07"], "allegations": ["A2"], "credibility_note": "Pike screen observation is hearsay-adjacent; he explicitly disclaims seeing the screen"},
+    {"id": "F19", "text": "Morgan admits 30 to 60 minutes daily on the business, acknowledges logs contradict break-time intent", "primary_doc": "11", "corroborating_docs": [], "allegations": ["A2"]},
+    {"id": "F20", "text": "14 Jul 2026 approx 1330, high bay: Morgan yelled at Ellis at close range after Ellis asked to verify cal status; present: Duran, Pike, unnamed PMEL individual", "primary_doc": "05", "corroborating_docs": ["06", "07", "11"], "allegations": ["A3"]},
+    {"id": "F21", "text": "Ellis recalls: useless, dumbest Airman he had ever supervised, make my life hell", "primary_doc": "05", "corroborating_docs": [], "allegations": ["A3"], "attribution": "ellis_recollection"},
+    {"id": "F22", "text": "Duran recalls: worthless (certain), you will regret questioning me (meaning certain, wording not)", "primary_doc": "06", "corroborating_docs": [], "allegations": ["A3"], "attribution": "duran_recollection"},
+    {"id": "F23", "text": "Pike heard only: worthless (one earbud in, at distance)", "primary_doc": "07", "corroborating_docs": [], "allegations": ["A3"], "attribution": "pike_recollection"},
+    {"id": "F24", "text": "Incident ended with Duran intervening; Morgan slammed office door (blinds fell per Duran)", "primary_doc": "06", "corroborating_docs": ["05", "07"], "allegations": ["A3"]},
+    {"id": "F25", "text": "Morgan admits: worthless, possibly dumbest Airman line, raised voice, in Ellis's space, unprofessional; does not recall threats", "primary_doc": "11", "corroborating_docs": [], "allegations": ["A3"]},
+    {"id": "F26", "text": "Morgan concedes Ellis's request was proper and retracts 15 Jul 'soft / blown out of proportion' remark", "primary_doc": "11", "corroborating_docs": ["10"], "allegations": ["A3"]},
+    {"id": "F27", "text": "Ellis reported to Voss morning of 15 Jul; Voss took notes and elevated to commander same day; CDI initiated", "primary_doc": "10", "corroborating_docs": ["05"], "allegations": ["A3"]},
+    {"id": "F28", "text": "Pike texted Ellis afternoon of 14 Jul; Ellis texted his dad night of 14 Jul", "primary_doc": "05", "corroborating_docs": ["07"], "allegations": ["A3"], "date_trap": "Both events are 14 Jul, not 15 Jul. Distinct from the 15 Jul report to Voss."}
+  ],
+
+  "expected_conflicts": [
+    {
+      "id": "C1",
+      "name": "delegation_dispute",
+      "facts": ["F12", "F04"],
+      "positions": {"morgan": "verbally delegated checks to Duran mid May", "duran": "never delegated, two logged checks were self initiated"},
+      "expected_resolution": "Delegation claim not credible (no documentation, no follow up, Duran sworn denial). Even if credited, responsibility non delegable per appointment letter.",
+      "weight": "high"
+    },
+    {
+      "id": "C2",
+      "name": "exact_wording_14jul",
+      "facts": ["F21", "F22", "F23", "F25"],
+      "positions": {"ellis": "useless, dumbest Airman, make my life hell", "duran": "worthless, you will regret questioning me", "pike": "worthless only", "morgan": "admits worthless, maybe dumbest Airman, no recall of threats"},
+      "expected_resolution": "Core demeaning conduct corroborated by all four. Word 'worthless' corroborated by three including subject. Threat language uncertain. Allegation substantiable without resolving exact words.",
+      "weight": "medium"
+    },
+    {
+      "id": "C3",
+      "name": "break_time_defense",
+      "facts": ["F15", "F16", "F19"],
+      "positions": {"morgan": "intended breaks and lunch only", "records": "clustering inside core duty hours, 30 to 60 min daily admitted"},
+      "expected_resolution": "Defense fails against certified logs and subject's own admission.",
+      "weight": "medium"
+    },
+    {
+      "id": "C4",
+      "name": "pike_credibility_weighting",
+      "facts": ["F23"],
+      "positions": {},
+      "expected_resolution": "Pike testimony down weighted: single earbud, distance, no view of precipitating exchange. Corroborative only, not independent proof of full statements.",
+      "weight": "low",
+      "type": "credibility_annotation"
+    }
+  ],
+
+  "expected_gaps": [
+    {"id": "G1", "text": "High bay camera footage (no audio) referenced by Duran; functionality unconfirmed", "source_doc": "06"},
+    {"id": "G2", "text": "Tasker and relocation survey records supporting Morgan's workload claim (context, not exculpation)", "source_doc": "11"},
+    {"id": "G3", "text": "Endpoint level artifacts beyond proxy logs would require separate cyber squadron request", "source_doc": "09"}
+  ],
+
+  "timeline_gold": [
+    {"date": "2025-11", "precision": "month", "event": "Ellis assigned to section", "docs": ["05"]},
+    {"date": "2026-03-18", "precision": "day", "event": "Morgan becomes NCOIC, signs appointment letter", "docs": ["08", "10", "11"]},
+    {"date": "2026-05-04", "precision": "day", "event": "Morgan logs weekly check", "docs": ["08"]},
+    {"date": "2026-05-11", "precision": "day", "event": "Morgan logs weekly check (his last)", "docs": ["08"]},
+    {"date": "2026-05", "precision": "approx_mid_month", "event": "Claimed verbal delegation to Duran (disputed)", "docs": ["11"]},
+    {"date": "2026-05-26", "precision": "day", "event": "Duran self initiated check", "docs": ["08", "06"]},
+    {"date": "2026-06-02", "precision": "day", "event": "Okafor May reconciliation email", "docs": ["08", "10"]},
+    {"date": "2026-06-03", "precision": "day", "event": "Voss verbal counseling, MFR", "docs": ["10", "11"]},
+    {"date": "2026-06-08", "precision": "day", "event": "Ellis finds generator out of tolerance", "docs": ["05"]},
+    {"date": "2026-06-09", "precision": "day", "event": "Generator turned in to PMEL by section", "docs": ["08"]},
+    {"date": "2026-06-12", "precision": "day", "event": "Okafor flags PMEL finding by email; Morgan never replies", "docs": ["08", "10"]},
+    {"date": "2026-06-16", "precision": "day", "event": "Okafor re-sends reconciliation email", "docs": ["08"]},
+    {"date": "2026-06-17", "precision": "day", "event": "Voss written counseling, signed by Morgan", "docs": ["10", "11"]},
+    {"date": "2026-06-23", "precision": "day", "event": "Duran self initiated check", "docs": ["08"]},
+    {"date": "2026-06-25", "precision": "day", "event": "Voss observes storefront dashboard on Morgan's screen", "docs": ["10"]},
+    {"date": "2026-07-14T13:30", "precision": "approx_time", "event": "High bay incident: Morgan berates Ellis; Duran intervenes; door slam", "docs": ["05", "06", "07", "11"]},
+    {"date": "2026-07-14", "precision": "day", "event": "Pike texts Ellis (afternoon); Ellis texts his dad (night)", "docs": ["05", "07"]},
+    {"date": "2026-07-15", "precision": "day", "event": "Ellis reports to Voss; Voss elevates to commander; Morgan makes 'soft' remark to Voss", "docs": ["10", "05", "11"]},
+    {"date": "2026-08-15", "precision": "day", "event": "IO appointed (plan doc)", "docs": ["plan"]},
+    {"date": "2026-08-19", "precision": "day", "event": "Ellis interview 0900; Duran interview 1300", "docs": ["05", "06"]},
+    {"date": "2026-08-20", "precision": "day", "event": "Pike 0830; Okafor 1030; Liu 1400 interviews", "docs": ["07", "08", "09"]},
+    {"date": "2026-08-21", "precision": "day", "event": "Voss interview 0900", "docs": ["10"]},
+    {"date": "2026-08-25", "precision": "day", "event": "Subject interview 0900, rights waived 0902, concluded 1042", "docs": ["11"]}
+  ],
+
+  "trap_inventory": {
+    "coreference": [
+      "First person I in answers resolves to that document's interviewee (metadata header)",
+      "Second person you in IO questions resolves to the interviewee",
+      "Pike first name Morgan must not merge with subject surname Morgan",
+      "Embedded quotes inside answers ('quote, useless') are Morgan's words as recalled by the speaker, not the speaker's self description"
+    ],
+    "negation": [
+      "F04: zero checks AFTER 11 May, not zero on 11 May",
+      "F07: Morgan never replied",
+      "F05: seals NOT replaced implies checks NOT performed",
+      "Pike explicitly did NOT see Morgan's screen"
+    ],
+    "date_precision": [
+      "mid May stays approximate (F12)",
+      "since March / since November stay month precision, never day one of month as exact",
+      "the following Monday after 17 Jun is inferred, must be tagged inferred if emitted",
+      "F28: texts are 14 Jul, report to Voss is 15 Jul"
+    ],
+    "sourcing": [
+      "F15/F16 primary source is doc 09, subject restatement in doc 11 is secondary",
+      "F03/F04/F05 primary source is doc 08"
+    ],
+    "hearsay_flags": [
+      "Voss knowledge of 14 Jul incident is secondhand from Ellis",
+      "Pike knowledge of the precipitating request is secondhand from Duran",
+      "Pike sneaker talk knowledge is explicitly hearsay"
+    ]
+  },
+
+  "scoring": {
+    "disposition_accuracy": {"metric": "exact match per allegation A1 A2 A3", "pass_threshold": "3/3", "note": "Also fail if allegation count != 3 or objective treated as an allegation"},
+    "entity_resolution": {"metric": "precision and recall vs persons list", "pass_threshold": "P=1.0 (zero phantom entities), R>=7/8"},
+    "fact_recall": {"metric": "gold_facts recalled with correct primary or corroborating citation", "pass_threshold": ">=22/28"},
+    "negation_accuracy": {"metric": "all negation_trap items correct polarity", "pass_threshold": "4/4"},
+    "conflict_recall": {"metric": "expected_conflicts detected", "pass_threshold": ">=3/4 including C1"},
+    "date_accuracy": {"metric": "timeline_gold events within stated precision, no fabricated exact dates", "pass_threshold": ">=18/23 and zero precision upgrades"},
+    "sourcing_discipline": {"metric": "sourcing_trap facts cite primary doc first", "pass_threshold": "2/2"},
+    "summary_consistency": {"metric": "every summary disposition matches findings section by allegation id", "pass_threshold": "exact"}
+  }
+}

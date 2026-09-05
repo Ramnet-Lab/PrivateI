@@ -67,6 +67,36 @@ _PRONOUNS = {"i", "me", "you", "he", "she", "they", "we", "the interviewee",
              "interviewee", "unknown", "the subject", "the witness", "io",
              "the member", "the investigator"}
 
+# A role is a position, not a person. Extracting "Equipment Test Craftsman" as
+# a PERSON creates a node that can silently collect another person's actions -
+# the same class of harm as an invented name, reached by a different route.
+_ROLE_WORDS = re.compile(
+    r"\b(administrator|technician|craftsman|journeyman|apprentice|chief|"
+    r"supervisor|monitor|manager|officer|commander|custodian|operator|"
+    r"specialist|analyst|inspector|superintendent|director|noncommissioned|"
+    r"nco|ncoic|oic|section|flight|squadron|shop|clerk|assistant)\b", re.I)
+_HONORIFIC = re.compile(
+    r"^(a1c|amn|sra|ssgt|tsgt|msgt|smsgt|cmsgt|2lt|1lt|capt|maj|lt|ltcol|col|"
+    r"gen|mr|mrs|ms|miss|dr|sir|madam|civ)\b", re.I)
+
+
+def looks_like_role(name: str) -> bool:
+    """True when a PERSON name is really a job title.
+
+    A real name may legitimately contain a role word after a rank ("TSgt Chief"
+    is a surname); the test is whether anything name-like survives once rank
+    and role vocabulary are removed.
+    """
+    text = str(name or "").strip()
+    if _HONORIFIC.match(text):
+        return False
+    if not _ROLE_WORDS.search(text):
+        return False
+    remainder = _ROLE_WORDS.sub(" ", text)
+    remainder = re.sub(r"\b(the|a|an|of|and|civilian|test|equipment|network)\b",
+                       " ", remainder, flags=re.I)
+    return not re.search(r"[A-Za-z]{3}", remainder)
+
 
 def name_grounded(name: str, page_text: str, header: str) -> bool:
     """A hard grounding constraint: no entity without a verbatim source span.
@@ -197,6 +227,8 @@ def validate(item: dict, page_text: str, header: str = "") -> tuple[dict | None,
         if etype in ("PERSON", "ORG") and not name_grounded(
                 str(item[role]), page_text, header):
             return None, f"{role} {item[role]!r} does not appear in the document"
+        if etype == "PERSON" and looks_like_role(str(item[role])):
+            return None, f"{role} {item[role]!r} is a job title, not a person"
 
     subject_type = str(item["subject_type"]).strip().upper()
     object_type = str(item["object_type"]).strip().upper()
