@@ -29,6 +29,29 @@ database password, builds the images, starts everything, downloads the models
 Safe to run again — it never overwrites your `.env` and never re-downloads a
 model you already have.
 
+### Windows
+
+```
+start-windows.cmd
+```
+
+Double-click it (or run `.\start.ps1` in PowerShell). Same flow as the Mac
+script: Docker Desktop via winget if missing, Model Runner enabled, models
+pulled, an inference proof, then the browser. On a machine with an AMD or
+Intel GPU, Model Runner uses its Vulkan backend automatically - no drivers to
+configure beyond the card's own. The script surfaces `docker model status` so
+you can see which backend answered; if it shows no GPU backend, update Docker
+Desktop (Vulkan support shipped in late 2025 and early builds had upgrade
+regressions).
+
+Plain-speak hardware note: the model is ~7.3 GB of weights. A card with 8 GB+
+of VRAM holds all of it and is fast; less VRAM means llama.cpp splits layers
+with system RAM and slows down accordingly. A machine short on both is the
+same wall the Mac hit.
+
+The background auto-updater has a Windows twin too: `.\auto-update.ps1`
+with `Once`, `Watch`, `Start`, `Stop`, `Status`.
+
 ### How the models run
 
 Models execute through **Docker Model Runner** — a Docker Desktop feature that

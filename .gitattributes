@@ -1,0 +1,13 @@
+# Line endings are load-bearing here. A Windows git with autocrlf=true would
+# check out start.sh with CRLF endings, and bash reads "\r" as part of every
+# line - the script dies on line 1 with an error that names nothing useful.
+* text=auto
+*.sh   text eol=lf
+*.py   text eol=lf
+*.yml  text eol=lf
+Makefile text eol=lf
+# cmd.exe genuinely misparses multi-line constructs without CRLF.
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+*.png  binary
+*.pdf  binary
