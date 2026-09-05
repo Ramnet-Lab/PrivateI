@@ -343,7 +343,7 @@ def reingest_document(doc_id: str):
     if not state.query_one("SELECT 1 AS n FROM documents WHERE doc_id=?", (doc_id,)):
         raise HTTPException(status_code=404, detail="document not found")
     _reset_document(doc_id)
-    runner.enqueue(doc_id)
+    runner.enqueue(doc_id, force=True)
     log.info("re-ingesting %s from the original file", doc_id)
     return JSONResponse({"reingesting": doc_id})
 
@@ -362,7 +362,7 @@ def reingest_all():
     with state.tx() as conn:
         conn.execute("DELETE FROM entities")
     for row in docs:
-        runner.enqueue(row["doc_id"])
+        runner.enqueue(row["doc_id"], force=True)
     log.info("re-ingesting all %d document(s)", len(docs))
     return JSONResponse({"reingesting": len(docs)})
 

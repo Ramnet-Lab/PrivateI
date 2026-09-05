@@ -29,11 +29,22 @@ _pending: set[str] = set()
 _pending_lock = threading.Lock()
 
 
-def enqueue(doc_id: str) -> None:
+def enqueue(doc_id: str, force: bool = False) -> None:
+    """Add a document to the work queue.
+
+    force=True is for re-ingest, which has already deleted the document's
+    pages and assertions. Without it the guard could refuse the re-add while
+    the reset had already thrown the old results away, leaving the document
+    wiped and unqueued - a wedge that no retry could clear because the stale
+    claim never expired.
+    """
     with _pending_lock:
         if doc_id in _pending:
-            log.info("%s is already queued or running; not adding it again", doc_id)
-            return
+            if not force:
+                log.info("%s is already queued or running; not adding it again",
+                         doc_id)
+                return
+            log.info("%s: re-ingest supersedes the in-flight run", doc_id)
         _pending.add(doc_id)
     state.set_status(doc_id, "queued", stage="queued", progress="waiting to start")
     _queue.put(doc_id)
