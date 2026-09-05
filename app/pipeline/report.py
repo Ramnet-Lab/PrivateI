@@ -68,6 +68,9 @@ OBJECTIVE_KEY = "cdi_objective"          # legacy free-text block
 GOAL_KEY = "cdi_goal"
 ALLEGATIONS_KEY = "cdi_allegations"      # JSON list, one string per allegation
 MAX_PASSAGES = 10
+# Routing discards passages, so retrieval has to over-fetch or the pass is
+# starved by its own filter.
+RETRIEVAL_WIDTH = 4
 MAX_RELATIONSHIPS = 40
 
 SUBSTANTIATED = "Substantiated"
@@ -421,6 +424,17 @@ policy), and how often. Take each element from the allegation's own words. Do
 not add an element the allegation does not assert. Do not merge two separate
 assertions into a single element.
 
+A rule the allegation cites - an article, a regulation, an instruction, a
+policy, a statute, or any acronym or short form standing for one - is the
+authority the conduct is said to offend, not a proposition to be proved from
+the documents. It is never an element, and a bare citation or acronym is never
+an element on its own. An
+investigation establishes what a person did; the corpus is a set of statements
+and records about their conduct and will not contain the text of the rule, so
+an element made out of a citation can only ever fail for want of evidence that
+was never going to be there. Decompose the conduct the allegation describes and
+leave the authority out of the table.
+
 If the allegation's wording asserts that the conduct happened more than once - a
 plural act, a frequency word, a pattern, a course of conduct - then one element
 is the repetition itself, marked MULTIPLICITY: yes. Every other element is
@@ -435,6 +449,16 @@ E1 | ELEMENT: <the proposition, in the allegation's own terms>
 
 CONFLICT_TEMPLATE = """You are comparing witness accounts against each other. Below
 are extracted facts and passages bearing on one allegation.
+
+THE ALLEGATION THESE ACCOUNTS BEAR ON: {allegation}
+
+You are not deciding it and you are not looking for support for it. It is here
+so you can tell a disagreement that decides something from one that decides
+nothing. Where accounts differ on the quality this allegation turns on -
+whether an act was ordered or offered, done on duty or off, refused freely or
+impossible to refuse, paid or unpaid - that difference is the one to report,
+ahead of a difference about where a remark was made or how many people were
+present. Report both kinds if you find both, decisive ones first.
 
 Resolve the pronouns before you compare anything. "I", "me", "my" and "we"
 belong to the speaker of the document they appear in; "you" belongs to the
@@ -457,6 +481,21 @@ These are NOT conflicts, and reporting one as a conflict is an error:
   - two accounts differing in a detail that neither of them denies.
 All of those belong under CORROBORATION.
 
+One account saying a person had no real choice and another saying the same act
+was optional is a CONFLICT, not corroboration, even though both agree the act
+happened. So is one account calling a thing an instruction and another calling
+it an invitation. Filing those under CORROBORATION because the act is not in
+dispute loses the only thing that was.
+
+But a disagreement about the CHARACTER of an act is a conflict, not a detail.
+Whether something was ordered or requested, compelled or voluntary, on duty or
+off duty, refused without consequence or impossible to refuse, paid or
+unpaid - two accounts can agree entirely on what physically happened and still
+be irreconcilable about what it was. That disagreement is usually the whole
+question an allegation turns on, so report it: A is one account of the act's
+character, B is the other. Neither side denying the act happened is exactly why
+this looks like a detail, and it is not one.
+
 These three you report as conflicts even though one side is a record rather than
 a second witness:
   - observation-limit: a witness stating a limit on their own observation -
@@ -467,7 +506,14 @@ a second witness:
     investigation that the records contradict. A is the defence, B is the
     evidence against it.
   - self-contradiction: an account contradicted by that same person's own words
-    elsewhere.
+    elsewhere. This includes a prior statement of theirs quoted back to them
+    inside another document - an interviewer reading out an earlier written
+    account, a record repeating what someone reported at the time. The two
+    halves need not sit in two different documents; what makes it a conflict is
+    that the same person said both things and both cannot be true. A person
+    departing from their own earlier account is one of the most consequential
+    things an investigation can record, so do not pass over it because both
+    quotes came off the same page.
 
 Number the items under each heading and use exactly this shape. Write NONE under
 a heading that has no items.
@@ -481,10 +527,24 @@ CONFLICTS:
    B: "<quote>" [filename p.N]
    INCOMPATIBLE: <why A and B cannot both be true>
 
+A and B are each a verbatim quotation with its own citation, and they are the
+two things that cannot both be true. Writing a description of the disagreement
+in B - "contradicts his earlier account", "this is inconsistent with the
+record" - leaves the entry with only one position in it, and a reader cannot
+adjudicate a conflict whose second side was never quoted. Say why they are
+incompatible in the INCOMPATIBLE line, which is what that line is for.
+
 CORROBORATION:
 1. FACT: <the fact both accounts independently support>
    A: "<quote>" [filename p.N]
    B: "<quote>" [filename p.N]
+
+Work through it systematically rather than reporting the first disagreement you
+notice. Take each account of each event in turn and compare it against every
+other account of that same event, including the same person's account given at
+a different time. Most conflicts in an investigation are quiet: two accounts
+that sound compatible read separately and cannot both be true read together.
+Report every one you find, not one per event.
 
 WHO IS SPEAKING IN EACH DOCUMENT:
 {speakers}
@@ -523,15 +583,40 @@ E<n> | ELEMENT: <the element>
      compensated, declined without consequence, off duty, outside the capacity
      alleged, or otherwise not the conduct this element describes; any interest
      a source supporting it has in the outcome, such as discipline, a grievance
-     or a dispute preceding the complaint; and any retraction or correction a
-     source made under questioning; "none">
+     or a dispute preceding the complaint; any retraction or correction a
+     source made under questioning; and where a supporting account is
+     secondhand - the speaker heard it from someone else, was not present, or
+     states a limit on what they could observe - say so and say what it costs
+     that account, because an account of what somebody else said is weaker
+     evidence of the act than an account of the act; "none">
    INSTANCES ESTABLISHED: <a whole number - how many separate occasions the
      evidence actually establishes for this element>
    MET: <Yes|No> - <one sentence: weighing the two lists against each other, is
      this element more likely true than not>
 
+Every finding here is about the conduct THIS allegation alleges. Where another
+numbered allegation covers a different act - a statement made, a card used, an
+order given - that act is answered in its own section and is not restated as a
+finding here, however plainly the documents establish it. Repeating it puts the
+same conduct under two allegations and makes the report read as though more was
+found than was.
+
 Weigh the opposing evidence, do not merely list it. An element asserting
-repeated conduct is not met by one conceded instance.>
+repeated conduct is not met by one conceded instance.
+
+Judge each element exactly as it is worded. Where the evidence establishes
+something weaker than the element asserts - that people helped rather than that
+they were directed to, that a thing was requested rather than ordered, that a
+person was present rather than responsible - the element is NOT met, however
+well that weaker fact is evidenced. Quietly substituting the weaker proposition
+and meeting that instead is the commonest way an allegation is wrongly
+substantiated, and it is invisible afterwards because the sentence reads as
+though the element were met.
+
+Where the opposing list is longer or carries more weight than the supporting
+list, MET is No, unless the same sentence says why that opposing evidence does
+not bear on the element as worded. "More likely true than not" is a comparison
+between the two lists, not a judgement that the supporting list exists.>
 
 **Disposition:** <{yes_label} | {no_label}>
 
@@ -552,9 +637,13 @@ this task as a source; a finding with nothing else behind it begins with
 
 <Adjudicate EVERY candidate listed under CANDIDATE CONFLICTS below - one
 numbered entry each: confirm it, resolve it with a source, or explain why it is
-not a real conflict. Two accounts of the same event that agree, or that differ
-only in what one of them does not mention, are not conflicts; say so and record
-them under Corroboration below instead. Include witness observation limits and any
+not a real conflict. Keep a candidate as a conflict unless the two accounts
+plainly agree: a comparison pass that had nothing else to do found it, and
+dropping it silently costs a reader something they cannot recover, while
+carrying one that turns out weak costs them a line they can judge for
+themselves. Two accounts of the same event that agree, or that differ only in
+what one of them does not mention, are not conflicts; say so and record them
+under Corroboration below instead, never by deleting them. Include witness observation limits and any
 defence the records contradict; both belong here rather than under Gaps. Add any
 further conflicts you see. Write "None identified." only if the candidate list
 was NONE and you find none yourself.>
@@ -1038,6 +1127,132 @@ def _grounded_citations(text: str, documents: set[str]) -> int:
     """
     return sum(1 for c in _CITE_ANY.findall(text)
                if _names_document(c, documents) and _carries_page(c, documents))
+
+
+def _flat_text(text: str) -> str:
+    return " ".join(str(text or "").lower().split())
+
+
+_FINDING_CITE = re.compile(r"\[([^\]\s,]+)[^\]]*?p{1,2}\.?\s*(\d+)[^\]]*\]",
+                           re.I)
+_FINDING_QUOTE = re.compile(r"[\"\u201c]([^\"\u201c\u201d]{12,}?)[\"\u201d]")
+
+
+def _foreign_refs(line: str, tagged: list[dict]) -> set[int]:
+    """Allegations the evidence behind this finding was filed under.
+
+    A finding quotes its evidence sometimes and paraphrases it the rest of the
+    time, so quotation alone finds only half of them. The paraphrase is matched
+    on the distinctive words of the assertion, and the bar is deliberately high
+    - most of them, not a few - because dropping a finding that belonged here
+    is worse than leaving one that did not.
+    """
+    text = _flat_text(line)
+    refs: set[int] = set()
+
+    # The citation is the third signal and the only one that survives a
+    # paraphrase. Where every tagged assertion on a cited page belongs to one
+    # allegation, that page IS that allegation's answer - the stretch of
+    # transcript following its marker - and a finding resting on it is resting
+    # on another allegation's section however it is worded. Pages carrying no
+    # markers, or markers for more than one allegation, say nothing here.
+    for doc, page in _FINDING_CITE.findall(line):
+        # The citation carries the filename with its extension; the document
+        # id does not. Match on whichever is the prefix of the other so a
+        # trailing ".pdf" cannot make a page look uncited.
+        stem = _flat_text(doc).rsplit(".", 1)[0]
+        on_page = [f for f in tagged
+                   if stem and str(f.get("page_num")) == page
+                   and (_flat_text(f.get("doc_id")).startswith(stem)
+                        or stem.startswith(_flat_text(f.get("doc_id"))))]
+        if len(on_page) < 2:
+            continue
+        page_refs = set()
+        for f in on_page:
+            page_refs |= {int(x) for x
+                          in re.findall(r"\d+", str(f["allegation_ref"]))}
+        if len(page_refs) == 1:
+            refs |= page_refs
+
+    quotes = [_flat_text(q) for q in _FINDING_QUOTE.findall(line)]
+    for f in tagged:
+        quote = _flat_text(f.get("quote") or "")
+        if not quote:
+            continue
+        matched = any(q in quote or quote in q for q in quotes)
+        if not matched:
+            words = [w for w in quote.split() if len(w) > 4]
+            if len(words) >= 5:
+                hits = sum(w in text for w in words)
+                matched = hits >= max(5, int(len(words) * 0.6))
+        if matched:
+            refs |= {int(x) for x in re.findall(r"\d+", str(f["allegation_ref"]))}
+    return refs
+
+
+CONFLICT_DRAWS = 3
+
+
+def _merge_candidates(blocks: list[str]) -> str:
+    """Pool numbered items from several passes, dropping repeats.
+
+    One comparison pass finds some of the disagreements in a record and a
+    second finds others: across runs of one unchanged corpus this pass has
+    returned a different pair of conflicts each time, which says the limit is
+    the sampling and not the evidence. Independent draws pooled together
+    recover what any single draw misses, and the adjudication downstream throws
+    out anything that does not hold - so a pass that is thorough and sometimes
+    wrong is worth more here than one that is careful and incomplete.
+
+    Two items are the same when they quote the same first position, which is
+    what survives rewording between draws.
+    """
+    seen: set[str] = set()
+    merged: list[str] = []
+    for block in blocks:
+        if not block or block.strip().upper() == "NONE":
+            continue
+        for item in re.split(r"(?m)^(?=\s*\d+\.\s)", block):
+            if not item.strip():
+                continue
+            quotes = _FINDING_QUOTE.findall(item)
+            fingerprint = _flat_text(quotes[0])[:90] if quotes else _flat_text(item)[:90]
+            if not fingerprint or fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+            merged.append(item.strip())
+    if not merged:
+        return "NONE"
+    return "\n".join(f"{n}. {re.sub(r'^\s*\d+\.\s*', '', item)}"
+                     for n, item in enumerate(merged, 1))
+
+
+def _drop_foreign_findings(section: str, facts: list[dict],
+                           number: int) -> tuple[str, list[str]]:
+    """Remove findings that restate a different allegation's conduct.
+
+    Each allegation is answered in its own section, and the act another
+    allegation is about - a statement made, a card used, an order given - is
+    established there. Repeating it here files one act under two allegations
+    and makes the report read as though more was found than was, which is the
+    error a reader is least able to catch, because every line of it is true.
+
+    A finding is foreign when the evidence behind it was filed under other
+    allegations and under none of this one. An untagged assertion is available
+    to every allegation and never makes a finding foreign, so a document with
+    no allegation markers cannot have its evidence withheld from anywhere.
+    """
+    tagged = [f for f in facts if str(f.get("allegation_ref") or "").strip()]
+    if not tagged:
+        return section, []
+    kept, dropped = [], []
+    for line in section.splitlines():
+        refs = _foreign_refs(line, tagged) if line.strip() else set()
+        if refs and number not in refs:
+            dropped.append(line.strip()[:70])
+            continue
+        kept.append(line)
+    return "\n".join(kept), dropped
 
 
 def _scrub_allegation_citations(section: str,
@@ -2275,9 +2490,15 @@ def generate(goal: str | None = None, allegations: list[str] | None = None, *,
     contexts: list[dict] = []
     for index, allegation in enumerate(allegations, 1):
         yield "status", f"Allegation {index} of {len(allegations)}: gathering evidence"
-        passages = embed.search(allegation, k=MAX_PASSAGES)
+        # Retrieve wide, then route, then trim. Routing is a filter, so taking
+        # the top MAX_PASSAGES first and filtering afterwards leaves however
+        # many survive - often far fewer than the pass needs, and the shortfall
+        # falls hardest on the conflict pass, which cannot report a
+        # contradiction whose two halves were never both retrieved.
+        passages = embed.search(allegation, k=MAX_PASSAGES * RETRIEVAL_WIDTH)
         facts = evidence.enrich(chat.relationships_for(allegation, passages), index_map)
         passages, facts = evidence.route(passages, facts, index, index_map)
+        passages = passages[:MAX_PASSAGES]
         contexts.append({"index": index, "allegation": allegation,
                          "passages": passages, "facts": facts})
 
@@ -2347,18 +2568,31 @@ def generate(goal: str | None = None, allegations: list[str] | None = None, *,
         # comparison first, adjudicated inside the findings second, pins it.
         yield "status", f"Allegation {index} of {len(allegations)}: comparing witnesses"
         conflict_candidates, corroboration = "NONE", "NONE"
-        try:
-            found = client.generate(
-                model,
-                CONFLICT_TEMPLATE.format(
-                    speakers=speaker_note,
-                    relationships=relationships,
-                    passages=passage_block),
-                system=system, options=options, think=thinking_enabled())
-            conflict_candidates, corroboration = _split_candidates(
-                found.get("response") or "", document_names)
-        except Exception as exc:
-            log.warning("conflict pass failed for allegation %d: %s", index, exc)
+        conflict_draws, corroboration_draws = [], []
+        for draw in range(CONFLICT_DRAWS):
+            try:
+                draw_options = dict(options)
+                draw_options["seed"] = random_seed()
+                found = client.generate(
+                    model,
+                    CONFLICT_TEMPLATE.format(
+                        allegation=allegation,
+                        speakers=speaker_note,
+                        relationships=relationships,
+                        passages=passage_block),
+                    system=system, options=draw_options,
+                    think=thinking_enabled())
+                one, two = _split_candidates(
+                    found.get("response") or "", document_names)
+                conflict_draws.append(one)
+                corroboration_draws.append(two)
+            except Exception as exc:
+                log.warning("conflict pass %d failed for allegation %d: %s",
+                            draw + 1, index, exc)
+        conflict_candidates = _merge_candidates(conflict_draws)
+        corroboration = _merge_candidates(corroboration_draws)
+        log.info("allegation %d: %d comparison draw(s) pooled", index,
+                 len(conflict_draws))
 
         yield "status", f"Allegation {index} of {len(allegations)}"
         goal_note = (f"INVESTIGATIVE GOAL (context only - goals are answered, "
@@ -2403,6 +2637,10 @@ def generate(goal: str | None = None, allegations: list[str] | None = None, *,
             # beside a SUPPORTING line the scrubber had just emptied, with the
             # disposition already settled on it and nothing to revisit it.
             section, circular = _scrub_allegation_citations(section, document_names)
+            section, foreign = _drop_foreign_findings(section, ctx["facts"], index)
+            for line in foreign:
+                log.info("allegation %d: dropped a finding belonging to another "
+                         "allegation: %s", index, line)
             rows = _parse_element_rows(section)
             # Which half of the shape the parser could not read, taken here
             # rather than after the corrections below, which withdraw verdicts

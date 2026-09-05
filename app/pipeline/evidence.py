@@ -621,8 +621,19 @@ def _route_from_text(index: dict, triples_by_page: dict, chunks_by_page: dict,
                 # answer from it. The union is never narrower than either input,
                 # so a disagreement between them widens what the assertion is
                 # available to instead of picking a winner.
-                refs = _union_refs(spans, spots) | (
-                    {stored} if stored is not None else set())
+                if len(spots) == 1:
+                    # One occurrence on the page is an exact placement, not a
+                    # guess, so it stands on its own. The worry that motivates
+                    # the union below - extraction's search stopping at the
+                    # first copy and always yielding the lowest-numbered
+                    # allegation - cannot arise where there is only one copy to
+                    # find. Widening here instead files an answer given under
+                    # one allegation into the findings of another, which is the
+                    # misrouting this index exists to prevent.
+                    refs = _union_refs(spans, spots)
+                else:
+                    refs = _union_refs(spans, spots) | (
+                        {stored} if stored is not None else set())
             else:
                 # The quote could not be found in its own page text - the
                 # chunker repairs a split sentence, and a quote read back from a
@@ -635,7 +646,15 @@ def _route_from_text(index: dict, triples_by_page: dict, chunks_by_page: dict,
                 # fully marked page is a single number, and the assertion would
                 # be withheld from every other allegation on the strength of a
                 # placement that never happened.
-                refs = {None} | ({stored} if stored is not None else set())
+                # A stored tag changes what this failure means. Extraction
+                # placed the quote when it read the page and recorded which
+                # allegation's section it fell in; failing to find it again
+                # here is this index losing the quote, not evidence that the
+                # earlier placement was wrong. Marking it unplaced as well
+                # would hand it to every allegation and let an answer given
+                # under one allegation appear in another's findings. Only a
+                # quote nobody ever placed stays available to all.
+                refs = {stored} if stored is not None else {None}
             quote = _flat(triple["quote"])
             index["by_quote_pred"].setdefault(
                 (doc, page, quote, _flat(triple["predicate"])), set()).update(refs)

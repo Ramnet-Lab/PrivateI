@@ -289,6 +289,10 @@ def labelled(lines: list[dict], name: str) -> list[tuple[int, str]]:
     return exact + prefix
 
 
+def _flat(text: str) -> str:
+    return " ".join(str(text or "").lower().split()).strip(":*# ")
+
+
 def _opens_label(line: dict) -> bool:
     """Whether a line starts something new rather than continuing a list.
 
@@ -309,7 +313,24 @@ def _opens_label(line: dict) -> bool:
         return False
     if not label or len(label.split()) > 6:
         return False
+    # A conflict entry is built out of labelled lines - TYPE, EVENT, A, B,
+    # INCOMPATIBLE - and every one of them is a short label against a value.
+    # Ending the section at the first of them truncated every conflict body to
+    # its opening line, so the checks read a report full of conflicts as a
+    # report with none. Only a label that names a section the report actually
+    # has ends one.
+    if value and _flat(label) not in SECTION_LABELS:
+        return False
     return not value or len(label.split()) == 1
+
+
+# The sections a report announces. Anything else labelled is content.
+SECTION_LABELS = {
+    "findings", "findings of fact", "conflicts", "conflicts in the evidence",
+    "corroboration", "gaps", "disposition", "dispositions", "elements",
+    "elements and weighing", "basis", "summary", "timeline", "persons",
+    "persons named",
+}
 
 
 _ALLEGATION = re.compile(
@@ -1145,11 +1166,25 @@ def score_credibility(key: dict, text: str) -> dict:
     credibility = any(w in body for w in
                       ("credibility", "motive", "bias", "grievance", "lor",
                        "letter of reprimand", "reliability"))
-    hearsay = any(w in body for w in
-                  ("hearsay", "secondhand", "second hand", "unnamed",
-                   "could not name", "not firsthand", "not first hand"))
-    return {"credibility_discussed": credibility, "hearsay_flagged": hearsay,
-            "pass": credibility and hearsay}
+    # The key asks for a hearsay chain "excluded from probative weight", which
+    # is two things: the report has to notice the account is secondhand, and it
+    # has to say that costs the account weight. An earlier version tested only
+    # the first, as a list of phrasings, and missed a report saying "nothing
+    # firsthand ... which limits the weight of his statement" - the very
+    # behaviour the metric asks for - because the list expected "not
+    # firsthand". Testing both halves is a truer reading of the metric than a
+    # longer list of synonyms would be.
+    noticed = any(w in body for w in
+                  ("hearsay", "secondhand", "second hand", "firsthand",
+                   "first hand", "unnamed", "could not name", "heard about",
+                   "told me", "repeating what"))
+    discounted = any(w in body for w in
+                     ("weight", "probative", "cannot rely", "not rely",
+                      "limits", "limited", "discount", "corroboration"))
+    hearsay = noticed and discounted
+    return {"credibility_discussed": credibility,
+            "hearsay_noticed": noticed, "hearsay_discounted": discounted,
+            "hearsay_flagged": hearsay, "pass": credibility and hearsay}
 
 
 # A verdict is reached one of two ways: by weighing the elements of the
@@ -1481,20 +1516,37 @@ def _ref_from_gold(item: str, gold: list[dict],
     that is not there.
     """
     blob = norm(item)
+    item_words = [w for w in blob.split() if len(w) > 4]
     scored = []
     for g in gold:
         words = [w for w in norm(g["text"]).split() if len(w) > 4]
         if len(words) < min_words:
             continue
         hit = sum(w in blob for w in words)
-        if hit >= min_words and hit / len(words) >= min_share:
-            scored.append((hit / len(words), g))
+        # Share is measured against the shorter of the two texts. Dividing by
+        # the gold fact's own length penalises a finding for how verbosely the
+        # key happened to write the fact: a finding recognising four
+        # distinctive words of a sixteen-word fact scores 0.25 and is dropped,
+        # while a shorter, wrong fact recognised by the same four words scores
+        # 0.33 and wins. That is a bias toward short gold facts, and it flagged
+        # a correctly-placed finding as misrouted.
+        span = min(len(words), max(1, len(item_words)))
+        if hit >= min_words and hit / span >= min_share:
+            scored.append((hit / span, hit, g))
     if not scored:
         return None
-    best = max(s for s, _ in scored)
+    best = max(s for s, _, _ in scored)
+    best_hits = max(h for _, h, _ in scored)
     pooled: set[int] = set()
-    for s, g in scored:
-        if s >= best - 0.05:
+    for share, hit, g in scored:
+        # Equal on share, or equal on how many of the sentence's distinctive
+        # words it accounts for. Share alone favours the shorter gold fact,
+        # and two facts recognised by the same words are equally identified by
+        # the sentence - the difference in share comes from the gold fact's own
+        # length, which the finding had no say in. Preferring one of them on
+        # that basis invented a misrouting where the finding matched the right
+        # fact and a shorter wrong one equally well.
+        if share >= best - 0.05 or hit >= best_hits:
             pooled |= {int(x) for x in re.findall(r"\d+", " ".join(g["allegations"]))}
     return pooled or None
 
@@ -2334,6 +2386,61 @@ SCORER_CONTROLS += [
                "event_date": d, "quote": "advances dated 6 June, 20 June, "
                "3 July and 17 July"}
               for d in ("2026-06-06", "2026-06-20", "2026-07-03")])["pass"]),
+]
+
+
+SCORER_CONTROLS += [
+    ("hearsay counts only when its weight is addressed",
+     lambda: not score_credibility(
+         {}, "The witness credibility and motive are discussed. He heard about "
+             "the move from a colleague.")["pass"]),
+
+    ("hearsay noticed and discounted passes however it is phrased",
+     lambda: score_credibility(
+         {}, "Complainant motive is discussed. Nothing firsthand; he heard "
+             "about it after the fact, which limits the weight of the "
+             "account.")["pass"]),
+
+    ("discounting language alone is not hearsay handling",
+     lambda: not score_credibility(
+         {}, "The evidence carries little weight and the limits are noted.")
+         ["pass"]),
+]
+
+
+SCORER_CONTROLS += [
+    ("a finding matching two gold facts equally well is not misrouted",
+     lambda: _ref_from_gold(
+         "Brandt stated he knew the rules and used the card for personal "
+         "expenses because he was in a financial hole",
+         [{"id": "F13", "allegations": ["A2"],
+           "text": "Brandt admits charges are personal, knew the rules, used "
+                   "the card because he was in a financial hole"},
+          {"id": "F15", "allegations": ["A3"],
+           "text": "Brandt stated he knew the rules regarding official "
+                   "expenses"}], 3, 0.2) == {2, 3}),
+
+    ("a finding matching one gold fact traces only there",
+     lambda: _ref_from_gold(
+         "Brandt made four cash advances at a casino in Henderson Nevada",
+         [{"id": "F10", "allegations": ["A2"],
+           "text": "four cash advances at a casino in Henderson Nevada"},
+          {"id": "F20", "allegations": ["A1"],
+           "text": "subordinates moved household goods on a Saturday"}],
+         3, 0.2) == {2}),
+]
+
+
+SCORER_CONTROLS += [
+    ("a verbosely written gold fact is not penalised for its length",
+     lambda: 2 in (_ref_from_gold(
+         "Brandt knew the rules and used the card for personal expenses "
+         "because he was in a financial hole",
+         [{"id": "F13", "allegations": ["A2"],
+           "text": "Brandt admits all nine charges are his and personal with "
+                   "no official nexus, knew the rules, used the card because "
+                   "he was in a financial hole and it was the only one with "
+                   "room"}], 3, 0.33) or set())),
 ]
 
 
