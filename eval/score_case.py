@@ -43,6 +43,15 @@ def norm(s: str) -> str:
     return re.sub(r"[^a-z0-9 ]", " ", (s or "").lower()).strip()
 
 
+def threshold(key: dict, category: str, default: int) -> int:
+    """Read the pass bar out of the key. Hardcoding it here would mean the
+    harness quietly grades every case against whatever the last case needed.
+    """
+    raw = str(key.get("scoring", {}).get(category, {}).get("pass_threshold", ""))
+    m = re.search(r"(\d+)\s*/\s*\d+", raw)
+    return int(m.group(1)) if m else default
+
+
 def score_entities(key: dict, facts: list[dict]) -> dict:
     """Precision is the one that must be perfect: inventing a person is worse
     than missing one, because a phantom carries other people's actions."""
@@ -181,21 +190,42 @@ def score_dates(key: dict, facts: list[dict]) -> dict:
         if (approx or vague_since) and basis in ("", "stated"):
             upgrades.append(f"{f['predicate']} @ {date} <- {f['quote'][:60]!r}")
     # Zero upgrades is only half the threshold; the other half is that the
-    # dated events actually made it into the timeline (>=18/23).
+    # dated events actually reached the timeline WITH their dates. Keyword
+    # overlap alone cannot tell "first casino cash advance" from the second,
+    # third and fourth - one extracted advance would satisfy all four gold
+    # entries and report recall that was never earned. A timeline is a claim
+    # about when, so the date has to match to the precision the key states.
     gold_tl = key.get("timeline_gold", [])
-    found = 0
+    found, missed = 0, []
     for event in gold_tl:
         words = [w for w in norm(event["event"]).split() if len(w) > 3][:5]
         if not words:
             continue
         need = max(2, len(words) // 2)
-        hit = any(sum(w in norm(f["quote"] + " " + f["predicate"] + " " +
-                                f["object_name"] + " " + f["subject_name"])
-                      for w in words) >= need for f in facts)
+        gold_date = str(event.get("date") or "")
+        width = 7 if event.get("precision") == "month" else 10
+        hit = False
+        for f in facts:
+            blob = norm(f["quote"] + " " + f["predicate"] + " " +
+                        str(f["object_name"]) + " " + str(f["subject_name"]))
+            if sum(w in blob for w in words) < need:
+                continue
+            if not gold_date:
+                hit = True
+                break
+            got = str(f.get("event_date") or "")
+            if got[:width] == gold_date[:width]:
+                hit = True
+                break
         found += 1 if hit else 0
+        if not hit:
+            missed.append(f"{gold_date} {event['event'][:44]}")
+
+    need_tl = threshold(key, "date_accuracy", default=18)
     return {"precision_upgrades": upgrades[:6], "upgrade_count": len(upgrades),
-            "timeline_events": f"{found}/{len(gold_tl)}",
-            "pass": not upgrades and found >= 18}
+            "timeline_events": f"{found}/{len(gold_tl)}", "needed": need_tl,
+            "missed": missed[:8],
+            "pass": not upgrades and found >= need_tl}
 
 
 def score_sourcing(key: dict, facts: list[dict]) -> dict:
@@ -213,10 +243,14 @@ def score_sourcing(key: dict, facts: list[dict]) -> dict:
     results = []
 
     for trap in key.get("trap_inventory", {}).get("sourcing", []):
-        m = re.search(r"primary source is doc\s*(\d+)", trap, re.I)
+        # Keys identify documents differently ("doc 09", "C2_09"); read
+        # whichever form this key uses rather than assuming one.
+        m = re.search(r"primary source is (?:doc\s*)?([A-Za-z0-9_]+)", trap, re.I)
         if not m:
             continue
-        primary = m.group(1).zfill(2)
+        primary = m.group(1)
+        if primary.isdigit():
+            primary = primary.zfill(2)
         fact_ids = re.findall(r"\bF\d{2}\b", trap)
         if not fact_ids:
             continue
@@ -354,23 +388,52 @@ def score_merges(key: dict, facts: list[dict]) -> dict:
             "pass": split_ok and merge_ok}
 
 
-def score_numeric(key: dict, facts: list[dict]) -> dict:
-    """Every number the key pins must appear exactly, digits intact.
+def _money_forms(value: str) -> list[str]:
+    """Every way a document might legitimately write one amount.
 
-    A transposed or rounded figure in a finding is indistinguishable from a
-    correct one to a reader, and money and counts are what findings turn on.
+    A verbatim transcript says "412 dollars and 88 cents" where the key writes
+    $412.88. Both are the same figure faithfully recorded, and a check that
+    only knows the digit form reports a fidelity failure against text that is
+    perfectly correct.
     """
+    raw = value.replace("$", "").replace(",", "").strip()
+    forms = {value, raw, value.replace("$", "")}
+    if "." in raw:
+        whole, cents = raw.split(".", 1)
+        cents = (cents + "0")[:2]
+        with_comma = f"{int(whole):,}" if whole.isdigit() else whole
+        forms |= {
+            f"{whole} dollars and {int(cents)} cents",
+            f"{with_comma} dollars and {int(cents)} cents",
+            f"{whole}.{cents}", f"{with_comma}.{cents}",
+        }
+    else:
+        with_comma = f"{int(raw):,}" if raw.isdigit() else raw
+        forms |= {f"{raw} dollars", f"{with_comma} dollars", with_comma}
+    return [f.lower() for f in forms if f]
+
+
+def score_numeric(key: dict, facts: list[dict]) -> dict:
+    """Every number the key pins must survive into the facts, in some faithful
+    form. Digits, words, and comma grouping all count; a changed digit does not.
+    """
+    # The key says which gold facts carry the numbers under test ("F10 numeric
+    # fields exact"). Sweeping every number in the whole key instead would
+    # grade this case against a value set the key never claimed.
+    metric = str(key.get("scoring", {}).get("numeric_fidelity", {}).get("metric", ""))
+    scoped = set(re.findall(r"\bF\d+\b", metric))
+    gold = [g for g in key["gold_facts"]
+            if not scoped or g.get("id") in scoped] or key["gold_facts"]
     wanted: list[str] = []
-    for g in key["gold_facts"]:
-        wanted += re.findall(r"\$[\d,]+\.?\d*|\b\d[\d,]{2,}\b", g["text"])
+    for g in gold:
+        wanted += re.findall(r"\$[\d,]+\.?\d*|\b\d[\d,]{2,}\.?\d*\b", g["text"])
     wanted = sorted(set(wanted))
-    blob = " ".join(f["quote"] + " " + f["object_name"] for f in facts)
-    blob_loose = blob.replace(",", "")
-    found = [w for w in wanted
-             if w in blob or w.replace(",", "").replace("$", "") in blob_loose]
+    blob = " ".join(f["quote"] + " " + f["object_name"] for f in facts).lower()
+    found = [w for w in wanted if any(form in blob for form in _money_forms(w))]
     return {"values": f"{len(found)}/{len(wanted)}",
             "missing": [w for w in wanted if w not in found][:6],
-            "pass": len(wanted) == 0 or len(found) >= len(wanted) - 1}
+            "scope": sorted(scoped) or "all gold facts",
+            "pass": len(wanted) == 0 or len(found) == len(wanted)}
 
 
 def score_exculpatory(key: dict, text: str) -> dict:
@@ -443,6 +506,8 @@ def score_report(key: dict, text: str) -> dict:
 
 
 def main() -> int:
+    if "--self-test" in sys.argv:
+        return self_test()
     ap = argparse.ArgumentParser()
     ap.add_argument("key")
     ap.add_argument("--report", help="a generated report .md to grade as well")
@@ -480,6 +545,92 @@ def main() -> int:
             print(f"         {k}: {v}")
     print(f"\n  {len(sections) - failed}/{len(sections)} categories passed")
     return failed
+
+
+
+# ---------------------------------------------------------------------------
+# Negative controls for the scorer itself.
+#
+# Every check in this file has at some point reported a pass it had not earned:
+# a sourcing check that matched the wrong document, a numeric check blind to
+# amounts written as words, a timeline check that let one extracted event
+# satisfy four distinct gold entries. A check that cannot fail is not
+# measuring anything. Each control below feeds a known defect to one check and
+# asserts it fails.
+# ---------------------------------------------------------------------------
+
+SCORER_CONTROLS = [
+    ("timeline rejects the right event on the wrong date",
+     lambda: not score_dates(
+         {"timeline_gold": [{"date": "2026-06-12", "precision": "day",
+                             "event": "First casino cash advance"}],
+          "scoring": {"date_accuracy": {"pass_threshold": ">=1/1"}}},
+         [{"quote": "cash advance at the casino", "predicate": "made",
+           "object_name": "advance", "subject_name": "Brandt",
+           "event_date": "2026-07-03", "event_date_basis": "stated"}])["pass"]),
+
+    ("timeline refuses to let one event satisfy two ordinals",
+     lambda: score_dates(
+         {"timeline_gold": [
+             {"date": "2026-06-12", "precision": "day", "event": "First casino cash advance"},
+             {"date": "2026-07-03", "precision": "day", "event": "Second casino cash advance"}],
+          "scoring": {"date_accuracy": {"pass_threshold": ">=2/2"}}},
+         [{"quote": "cash advance at the casino", "predicate": "made",
+           "object_name": "advance", "subject_name": "Brandt",
+           "event_date": "2026-06-12", "event_date_basis": "stated"}]
+     )["timeline_events"] == "1/2"),
+
+    ("numeric accepts an amount written in words",
+     lambda: score_numeric(
+         {"gold_facts": [{"id": "F10", "text": "restaurant charges of $412.88"}],
+          "scoring": {"numeric_fidelity": {"metric": "F10 numeric fields exact"}}},
+         [{"quote": "totaling 412 dollars and 88 cents", "object_name": ""}])["pass"]),
+
+    ("numeric still fails on a changed digit",
+     lambda: not score_numeric(
+         {"gold_facts": [{"id": "F10", "text": "restaurant charges of $412.88"}],
+          "scoring": {"numeric_fidelity": {"metric": "F10 numeric fields exact"}}},
+         [{"quote": "totaling 412 dollars and 89 cents", "object_name": ""}])["pass"]),
+
+    ("sourcing fails when only the secondary document is cited",
+     lambda: not score_sourcing(
+         {"documents": [{"doc_id": "C2_09", "file_match": "C2_09_Interview_Osei"},
+                        {"doc_id": "C2_11", "file_match": "C2_11_Interview_Brandt"}],
+          "gold_facts": [{"id": "F10",
+                          "text": "nine transactions totaling 1,847 dollars"}],
+          "trap_inventory": {"sourcing": ["F10 primary source is C2_09; "
+                                          "restatements in C2_11 are secondary"]}},
+         [{"quote": "nine transactions totaling 1,847 dollars", "object_name": "",
+           "doc_id": "C2_11_Interview_Brandt_Subject"}])["pass"]),
+
+    ("sourcing passes when the document of record is cited",
+     lambda: score_sourcing(
+         {"documents": [{"doc_id": "C2_09", "file_match": "C2_09_Interview_Osei"}],
+          "gold_facts": [{"id": "F10",
+                          "text": "nine transactions totaling 1,847 dollars"}],
+          "trap_inventory": {"sourcing": ["F10 primary source is C2_09"]}},
+         [{"quote": "nine transactions totaling 1,847 dollars", "object_name": "",
+           "doc_id": "C2_09_Interview_Osei_GTC"}])["pass"]),
+
+    ("threshold is read from the key, not from this file",
+     lambda: threshold({"scoring": {"date_accuracy":
+                                    {"pass_threshold": ">=19/22"}}},
+                       "date_accuracy", default=0) == 19),
+]
+
+
+def self_test() -> int:
+    print("negative controls - every scorer check must fail on its own defect\n")
+    passed = 0
+    for name, probe in SCORER_CONTROLS:
+        try:
+            ok = bool(probe())
+        except Exception as exc:                       # a crash is also a fail
+            ok, name = False, f"{name} [raised {type(exc).__name__}: {exc}]"
+        print(f"  [{'PASS' if ok else 'FAIL'}] {name}")
+        passed += ok
+    print(f"\n  {passed}/{len(SCORER_CONTROLS)} controls fired")
+    return 0 if passed == len(SCORER_CONTROLS) else 1
 
 
 if __name__ == "__main__":
