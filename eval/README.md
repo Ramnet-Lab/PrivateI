@@ -67,3 +67,23 @@ Feeds every assertion the exact defect it exists to catch and requires it to
 fire. Run this whenever a check is added or edited: a suite that has never
 failed proves nothing, and a green run only means something once you know the
 checks can go red.
+
+## A worked example of why you audit the scorer
+
+The sourcing check was wrong three times before it was right, and each time it
+was confidently wrong in a different direction:
+
+1. It read the **last** two-digit number in the trap text as the primary
+   document. That is the *secondary* document, so the check passed by testing
+   the very thing it exists to catch.
+2. Fixed to parse the named document, it then matched facts using content words
+   taken from the trap's own prose - `primary`, `source`, `restatement` - so it
+   matched any quote containing the word "source" and reported a failure while
+   testing nothing at all.
+3. Only when it resolved the gold fact IDs the trap names (`F15/F16`) and
+   matched on *their* text did it measure the pipeline's actual behaviour -
+   which turned out to be correct all along.
+
+Between (1) and (3) the same check reported PASS, then FAIL, then PASS, against
+a pipeline whose sourcing behaviour never changed. Believe a red light only
+after you have read the check that produced it.

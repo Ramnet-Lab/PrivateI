@@ -128,32 +128,54 @@ def score_dates(key: dict, facts: list[dict]) -> dict:
 
 
 def score_sourcing(key: dict, facts: list[dict]) -> dict:
-    """A documentary figure must be cited to the document of record, not to a
-    person restating it."""
+    """A documentary figure must be cited to the document of record.
+
+    Matching is done on the GOLD FACT the trap names (F15/F16...), never on the
+    trap's own prose. An earlier version took content words from the trap
+    sentence itself - 'primary', 'source', 'restatement' - and so matched any
+    quote containing the word "source". That produced a pass while testing the
+    wrong document, and then a failure while testing nothing at all. The trap
+    text describes the check; the gold facts are the check.
+    """
     docs = {d["doc_id"]: d["file_match"] for d in key["documents"]}
+    gold = {g["id"]: g for g in key["gold_facts"]}
     results = []
+
     for trap in key.get("trap_inventory", {}).get("sourcing", []):
-        # Read the primary from the phrase that names it. Taking the last
-        # two-digit number instead made this check pass by testing the
-        # SECONDARY document - a green light for the exact failure it exists
-        # to catch.
         m = re.search(r"primary source is doc\s*(\d+)", trap, re.I)
         if not m:
             continue
         primary = m.group(1).zfill(2)
-        words = [w for w in norm(trap).split() if len(w) > 5][:3]
-        related = [f for f in facts
-                   if sum(w in norm(f["quote"]) for w in words) >= 1]
-        cited = {f["doc_id"] for f in related}
-        want = docs.get(primary, "")
-        # Match on the document number prefix, which is what actually
-        # identifies it ("09_Interview_Liu..." -> "09").
-        ok = bool(want) and any(c.startswith(primary + "_") for c in cited)
-        results.append({"trap": trap[:58], "primary_doc": want[:26],
+        fact_ids = re.findall(r"\bF\d{2}\b", trap)
+        if not fact_ids:
+            continue
+
+        cited_docs: set[str] = set()
+        matched_ids: list[str] = []
+        for fid in fact_ids:
+            g = gold.get(fid)
+            if not g:
+                continue
+            words = [w for w in norm(g["text"]).split() if len(w) > 4][:6]
+            if not words:
+                continue
+            need = max(2, len(words) // 3)
+            hits = [f for f in facts
+                    if sum(w in norm(f["quote"] + " " + f["object_name"]) for w in words) >= need]
+            if hits:
+                matched_ids.append(fid)
+                cited_docs |= {f["doc_id"] for f in hits}
+
+        ok = bool(cited_docs) and any(c.startswith(primary + "_") for c in cited_docs)
+        results.append({"facts": fact_ids, "matched": matched_ids,
+                        "primary_doc": docs.get(primary, "")[:26],
                         "cited_primary": ok,
-                        "cited": sorted(c[:24] for c in cited)[:3]})
-    passed = sum(1 for r in results if r["cited_primary"])
-    return {"checks": results, "pass": bool(results) and passed == len(results)}
+                        "cited": sorted(c[:24] for c in cited_docs)[:3]})
+
+    checked = [r for r in results if r["matched"]]
+    return {"checks": results,
+            "note": "unmatched traps are a recall gap, not a sourcing error",
+            "pass": bool(checked) and all(r["cited_primary"] for r in checked)}
 
 
 def score_facts(key: dict, facts: list[dict]) -> dict:
