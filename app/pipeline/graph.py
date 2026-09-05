@@ -57,6 +57,20 @@ def rel_type(predicate: str) -> str:
     return rel[:60]
 
 
+# The relationship carries allegation_ref verbatim, exactly as the triples row
+# holds it, because the reader is the one that has to decide what a tag means:
+# whether the numbering starts at zero or one is inferred downstream from the
+# whole set of tags, and a value normalised here would destroy the evidence that
+# inference is drawn from. NULL is meaningful and is stored as such - it means
+# the assertion carried no marker and is available to every allegation, not that
+# it belongs to the first one.
+#
+# The copy on the edge is for provenance and for inspecting the graph by hand.
+# It routes nothing: report generation rebuilds its own index from the triples
+# table, so that table is the authority on which allegation an assertion
+# answers, and a tag rewritten by a re-extraction is fresh there and stale
+# here. Anyone changing routing has to change the table and the code that
+# reads it; changing this property alone moves no evidence anywhere.
 LOAD = """
 MERGE (s:Entity {{entity_id: $subject_id}})
   ON CREATE SET s.created_at = $now
@@ -71,6 +85,7 @@ SET r.predicate = $predicate, r.source_doc = $doc_id, r.source_page = $page_num,
     r.quote = $quote, r.event_date = $event_date,
     r.event_date_basis = $event_date_basis, r.source_file = $filename,
     r.source_kind = $source_kind, r.source_role = $source_role,
+    r.allegation_ref = $allegation_ref,
     r.loaded_at = $now
 """
 
@@ -89,6 +104,12 @@ def _load_one(tx, row, subject_id, object_id, subject_name, object_name, filenam
            event_date=row["event_date"],
            event_date_basis=(row["event_date_basis"]
                              if "event_date_basis" in row.keys() else None),
+           # sqlite3.Row indexes but has no .get(), and both of these columns
+           # arrived in a migration, so a database written before it has no such
+           # key at all. Asking keys() is the only way to tell a missing column
+           # from a NULL one without the load dying on a KeyError.
+           allegation_ref=(row["allegation_ref"]
+                           if "allegation_ref" in row.keys() else None),
            filename=filename, source_kind=source_kind,
            source_role=source_role, now=utcnow())
 
@@ -102,6 +123,15 @@ def load(doc_id: str | None = None, on_progress=lambda _m: None) -> int:
     rows = state.query(sql, params)
     if not rows:
         return 0
+
+    # Said once per load rather than once per row. An absent tag column is not
+    # an error - every assertion is then unrestricted, which is how the pipeline
+    # behaved before the column existed - but a report built on this graph will
+    # route no evidence, and without this line the reason would be invisible.
+    if "allegation_ref" not in rows[0].keys():
+        log.info("triples.allegation_ref is not present in this database; "
+                 "assertions load without an allegation tag and stay available "
+                 "to every allegation")
 
     # dict(r), not the Row itself: sqlite3.Row supports indexing but has no
     # .get(), and the miss only shows up at load time.
@@ -160,6 +190,13 @@ def entity_detail(eid: str) -> dict:
             id=eid).single()
         if not node:
             return {}
+        # allegation_ref is returned so that a fact read out of the graph
+        # carries the tag the edge was loaded with, which is what lets a
+        # reader on the entity page see which allegation an assertion is
+        # testimony about. It is not what routes evidence: report generation
+        # keys off the index it rebuilds from the triples table, and that
+        # table remains the authority, so a tag rewritten after a load is
+        # fresh there and stale here.
         facts = [dict(r) for r in session.run(
             """MATCH (e:Entity {entity_id:$id})-[r]-(other:Entity)
                WHERE r.triple_id IS NOT NULL
@@ -168,7 +205,8 @@ def entity_detail(eid: str) -> dict:
                       other.type AS other_type, other.entity_id AS other_id,
                       r.quote AS quote, r.source_doc AS source_doc,
                       r.source_page AS source_page, r.source_file AS source_file,
-                      r.event_date AS event_date
+                      r.event_date AS event_date,
+                      r.allegation_ref AS allegation_ref
                ORDER BY r.event_date, r.predicate""", id=eid)]
     return {"id": eid, "name": node["name"], "type": node["type"], "facts": facts}
 

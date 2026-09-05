@@ -51,6 +51,13 @@ CREATE TABLE IF NOT EXISTS pages (
     PRIMARY KEY (doc_id, page_num)
 );
 
+-- allegation_ref records which numbered allegation an assertion is testimony
+-- about. A marker line in an interview turns the questioning to one allegation,
+-- and everything said after it until the next marker answers that one, so an
+-- assertion drawn from that stretch is tagged with its number. NULL means the
+-- page carried no marker and the assertion is unrestricted - it does NOT mean
+-- the assertion belongs to allegation 1. The value is a bare arabic numeral
+-- matching the 1-based position of the allegation in the stated objective.
 CREATE TABLE IF NOT EXISTS triples (
     triple_id    TEXT PRIMARY KEY,
     doc_id       TEXT NOT NULL,
@@ -62,6 +69,7 @@ CREATE TABLE IF NOT EXISTS triples (
     object_name  TEXT NOT NULL,
     event_date   TEXT,
     event_date_basis TEXT,
+    allegation_ref TEXT,
     quote        TEXT NOT NULL,
     model        TEXT,
     created_at   TEXT NOT NULL,
@@ -135,6 +143,7 @@ MIGRATIONS = [
     "ALTER TABLE triples ADD COLUMN event_date_basis TEXT",
     "ALTER TABLE documents ADD COLUMN doc_kind TEXT",
     "ALTER TABLE documents ADD COLUMN doc_role TEXT",
+    "ALTER TABLE triples ADD COLUMN allegation_ref TEXT",
 ]
 
 

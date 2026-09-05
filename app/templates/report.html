@@ -25,20 +25,43 @@
 
 <div class="row">
   <button id="save" class="btn">Save objective</button>
+  <label class="small" for="runs">Runs</label>
+  <input id="runs" type="number" min="1" max="{{ max_runs }}" step="1" value="1"
+         style="width: 64px">
   <button id="run" {% if not chat_model %}disabled{% endif %}>Run report</button>
   <span id="status" class="small"></span>
 </div>
 
+<p class="note small">
+  More than one run writes the report that many times over the same corpus, each
+  with its own random seed, and compares the results against each other. An
+  allegation whose disposition changes between runs was decided by sampling
+  rather than by the record, and is reported as unstable. Maximum {{ max_runs }};
+  each run costs a full report.
+</p>
+
+<p class="small">
+  <label><input type="checkbox" id="allow-incomplete">
+    Write the report even if a document is still processing or has lost
+    assertions</label><br>
+  Off by default. The refusal exists for the case where nobody has noticed the
+  corpus is short; every disposition produced with this on rests on a partial
+  record and the report says so at the top.
+</p>
+
+<div id="consensus" hidden></div>
 <div id="out" class="report-out" hidden></div>
 
 {% if previous %}
 <h2>Previous reports</h2>
 <table>
-  <tr><th>Generated</th><th>Model</th><th>Documents</th><th>Facts</th><th></th></tr>
+  <tr><th>Generated</th><th>Model</th><th>Seed</th><th>Documents</th><th>Facts</th><th></th></tr>
   {% for r in previous %}
   <tr>
-    <td class="small">{{ r.created_at }}</td>
+    <td class="small">{{ r.created_at }}{% if r.report_id.startswith('consensus-') %}
+      <span class="tag queued">consensus</span>{% endif %}</td>
     <td class="small">{{ r.model }}</td>
+    <td class="small">{% if seeds.get(r.report_id) %}{{ seeds[r.report_id] }}{% else %}&mdash;{% endif %}</td>
     <td>{{ r.documents }}</td>
     <td>{{ r.assertions }}</td>
     <td><a class="btn" href="/reports/{{ r.report_id }}">Download</a></td>
@@ -54,6 +77,9 @@ const goalBox = document.getElementById('goal');
 const list = document.getElementById('allegations');
 const statusEl = document.getElementById('status');
 const out = document.getElementById('out');
+const runsBox = document.getElementById('runs');
+const allowBox = document.getElementById('allow-incomplete');
+const consensusEl = document.getElementById('consensus');
 
 function renumber() {
   list.querySelectorAll('.allegation-row .alg-num')
@@ -64,7 +90,7 @@ function addRow(text) {
   row.className = 'allegation-row';
   row.innerHTML = '<span class="alg-num"></span>' +
     '<textarea rows="2" spellcheck="false"></textarea>' +
-    '<button type="button" class="btn danger alg-del" title="remove">\u00d7</button>';
+    '<button type="button" class="btn danger alg-del" title="remove">×</button>';
   row.querySelector('textarea').value = text || '';
   list.appendChild(row);
   renumber();
@@ -98,18 +124,74 @@ document.getElementById('save').addEventListener('click', async () => {
   statusEl.textContent = `saved — ${d.allegations} allegation(s)`;
 });
 
+const esc = (s) => String(s === null || s === undefined ? '' : s)
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+// The comparison is shown as a table above the report text so that a
+// disagreement between runs is the first thing on the page rather than
+// something the operator has to find by scrolling through every run.
+function renderConsensus(payload) {
+  const s = payload.summary;
+  const rows = s.allegations.map((a) => {
+    const ev = a.evidence;
+    const cited = !ev.union ? 'no page citations found'
+      : ev.stable ? `same ${ev.shared} citation(s) every run`
+      : `${ev.shared} of ${ev.union} citation(s) in every run`;
+    const modal = a.modal === null ? '<strong>split — no modal disposition</strong>'
+                                   : esc(a.modal);
+    const flag = a.unstable ? ' <span class="tag failed">unstable</span>'
+      : (!ev.stable ? ' <span class="tag text_only">evidence moved</span>' : '');
+    return `<tr><td>${a.index}</td><td>${a.agreement}/${a.of}</td>` +
+           `<td>${modal}${flag}</td><td class="small">${esc(cited)}</td></tr>`;
+  }).join('');
+  const seeds = payload.runs.map((r) =>
+    `<tr><td>${r.n}</td><td class="small">${esc(r.seed)}</td>` +
+    `<td class="small">${r.report_id
+      ? `<a href="/reports/${esc(r.report_id)}">${esc(r.report_id)}</a>`
+      : '—'}</td><td class="small">${esc(r.error || 'read')}</td></tr>`).join('');
+  const unstable = s.unstable.length
+    ? `<p class="warn">Allegation(s) ${s.unstable.join(', ')} changed between
+       runs of the same record. A disposition that is not reproduced by a second
+       run of the same documents was determined by sampling, not by the
+       evidence.</p>`
+    : '';
+  const moved = s.evidence_unstable.length
+    ? `<p class="warn">Allegation(s) ${s.evidence_unstable.join(', ')} kept the
+       same disposition in every run but rested it on different citations each
+       time.</p>`
+    : '';
+  consensusEl.innerHTML =
+    `<h2>Consensus across ${s.runs} runs</h2>${unstable}${moved}` +
+    '<table><tr><th>#</th><th>Agreement</th><th>Modal disposition</th>' +
+    `<th>Cited evidence</th></tr>${rows}</table>` +
+    '<table><tr><th>Run</th><th>Seed</th><th>Report</th><th>Outcome</th></tr>' +
+    `${seeds}</table>`;
+  consensusEl.hidden = false;
+}
+
 document.getElementById('run').addEventListener('click', async () => {
   out.hidden = false;
   out.textContent = '';
+  consensusEl.hidden = true;
+  consensusEl.innerHTML = '';
   statusEl.textContent = 'starting…';
   const run = document.getElementById('run');
   run.disabled = true;
 
   try {
+    const payload = collect();
+    payload.runs = runsBox.value;
+    payload.allow_incomplete = allowBox.checked;
     const res = await fetch('/api/report', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(collect()),
+      body: JSON.stringify(payload),
     });
+    // A rejected request answers with JSON, not with an event stream; reading it
+    // as a stream would leave the page saying "starting…" for ever.
+    if (!res.ok) {
+      const problem = await res.json().catch(() => null);
+      throw new Error((problem && problem.detail) || `HTTP ${res.status}`);
+    }
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
@@ -126,9 +208,15 @@ document.getElementById('run').addEventListener('click', async () => {
         let data; try { data = JSON.parse(raw); } catch { continue; }
         if (kind === 'status') {
           statusEl.textContent = data;
+        } else if (kind === 'run') {
+          statusEl.textContent = `run ${data.n} of ${data.of} — seed ${data.seed}`;
+        } else if (kind === 'run-done') {
+          statusEl.textContent = `run ${data.n} of ${data.of} finished`;
         } else if (kind === 'token') {
           out.textContent += data;
           out.scrollTop = out.scrollHeight;
+        } else if (kind === 'consensus') {
+          renderConsensus(data);
         } else if (kind === 'error') {
           statusEl.textContent = 'failed';
           out.textContent += '\n\n' + data;

@@ -29,6 +29,7 @@ import http.client
 import json
 import mimetypes
 import os
+import random
 import socket
 import time
 from pathlib import Path
@@ -498,14 +499,25 @@ class ModelRunner:
 Ollama = ModelRunner
 
 
+def random_seed() -> int:
+    """A fresh seed, for callers that want independent samples.
+
+    Sampling alone does not vary the answer: the same seed at the same
+    temperature reproduces the same text. Varying the seed is what makes a
+    second run an independent draw rather than a copy of the first.
+    """
+    return random.randrange(1, 2**31 - 1)
+
+
 def default_options(temperature_var: str, ctx_var: str,
                     predict_var: str | None = None,
-                    predict_default: int = 0) -> dict[str, Any]:
-    """Deterministic by default - transcription must be reproducible."""
+                    predict_default: int = 0,
+                    seed: int | None = None) -> dict[str, Any]:
+    """Reproducible by default; pass seed to draw an independent sample."""
     options = {
         "temperature": env_float(temperature_var, 0.0),
         "num_ctx": env_int(ctx_var, 8192),   # kept for callers; unused here
-        "seed": env_int("OLLAMA_SEED", 42),
+        "seed": env_int("OLLAMA_SEED", 42) if seed is None else int(seed),
     }
     # 0 or less means no cap; the request timeout is the backstop. On a
     # reasoning model a cap lands on the answer, not the deliberation.

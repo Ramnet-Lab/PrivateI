@@ -26,7 +26,8 @@ from fastapi.templating import Jinja2Templates
 APP_DIR = Path(os.environ.get("APP_DIR", "/app"))
 sys.path.insert(0, str(APP_DIR))
 
-from pipeline import chat, embed, graph, paths, report, runner, state  # noqa: E402
+from pipeline import (chat, consensus, embed, graph, model_client, paths,  # noqa: E402
+                      report, runner, state)
 from pipeline.log import get_logger, utcnow               # noqa: E402
 
 log = get_logger("app")
@@ -165,6 +166,11 @@ def report_page(request: Request):
         "c": _counts(), "goal": report.get_goal(),
         "allegations": report.get_allegations(), "previous": previous,
         "chat_model": os.environ.get("TEXT_MODEL", "").strip(),
+        # The seed is shown beside each stored report because the pipeline no
+        # longer samples at temperature zero: without it a report cannot be
+        # regenerated, and the operator would have no way to tell which of two
+        # differing reports was which.
+        "seeds": consensus.seeds(), "max_runs": consensus.MAX_RUNS,
     })
 
 
@@ -179,20 +185,141 @@ def api_objective(payload: dict):
     return JSONResponse({"saved": True, "allegations": len(report.get_allegations())})
 
 
+def _sse(kind: str, data) -> str:
+    return f"event: {kind}\ndata: {json.dumps(data)}\n\n"
+
+
+def _runs_requested(value) -> int:
+    """How many independent runs of the report to generate and compare.
+
+    Bounded on both sides. Each run is a full report - several model passes per
+    allegation on CPU - so an unbounded number here is an unbounded amount of
+    machine time started by one click, and a request for zero runs is a request
+    for nothing rather than for the default.
+    """
+    if value is None or value == "":
+        return 1
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise HTTPException(status_code=400, detail="runs must be a whole number")
+    try:
+        runs = int(str(value).strip())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="runs must be a whole number")
+    if not 1 <= runs <= consensus.MAX_RUNS:
+        raise HTTPException(status_code=400,
+                            detail=f"runs must be between 1 and {consensus.MAX_RUNS}")
+    return runs
+
+
+def _report_runs(goal, allegations, runs: int, allow_incomplete: bool):
+    """Stream one report per run, then the comparison between them.
+
+    Every run draws its own seed. Sampling alone would not make the second run
+    an independent draw - the same seed at the same temperature reproduces the
+    same text - so without a fresh seed each time the comparison below would be
+    a document compared with a copy of itself.
+
+    A run that fails stops the queue: the refusals are deterministic, so a
+    second attempt under the same conditions would fail the same way. Whatever
+    completed before the failure is still compared, because throwing away four
+    good runs because the fifth timed out helps nobody. The runs that never
+    started stay in the list and say so, so the denominator of every agreement
+    ratio remains the number of runs the operator asked for - a comparison that
+    quietly shrinks its own denominator reports better agreement the more runs
+    it loses.
+    """
+    members = [{"n": n, "seed": None, "report_id": None,
+                "error": "not run - an earlier run failed", "allegations": None}
+               for n in range(1, runs + 1)]
+    for member in members:
+        number, seed = member["n"], model_client.random_seed()
+        member["seed"], member["error"] = seed, None
+        yield _sse("run", {"n": number, "of": runs, "seed": seed})
+        if runs > 1:
+            yield _sse("token", f"\n\n===== Run {number} of {runs} "
+                                f"(seed {seed}) =====\n\n")
+
+        for kind, data in report.generate(goal, allegations, seed=seed,
+                                          allow_incomplete=allow_incomplete):
+            if kind == "done":
+                member["report_id"] = (data or {}).get("report_id")
+                continue
+            if kind == "error":
+                member["error"] = str(data)
+            elif kind == "status" and runs > 1:
+                data = f"Run {number} of {runs}: {data}"
+            yield _sse(kind, data)
+
+        if member["report_id"]:
+            consensus.record_seed(member["report_id"], seed)
+            yield _sse("run-done", {"n": number, "of": runs, "seed": seed,
+                                    "report_id": member["report_id"]})
+        if member["error"]:
+            log.error("run %d of %d failed: %s", number, runs, member["error"])
+            break
+
+    if runs == 1:
+        if members[0]["report_id"]:
+            yield _sse("done", {"report_id": members[0]["report_id"], "runs": 1})
+        return
+
+    yield _sse("status", "Comparing runs")
+    for member in members:
+        if not member["report_id"]:
+            member["error"] = member["error"] or "the run produced no report"
+            continue
+        row = state.query_one("SELECT body FROM reports WHERE report_id=?",
+                              (member["report_id"],))
+        try:
+            if not row:
+                raise consensus.UnreadableRun("the report was not stored")
+            member["allegations"] = consensus.read_run(row["body"])
+        except consensus.UnreadableRun as exc:
+            # Loud, and counted against agreement rather than dropped. A run
+            # whose dispositions could not be parsed did not agree with the
+            # others, and silently comparing only the runs that parsed would
+            # report a parsing failure as consensus.
+            member["error"] = f"could not be read: {exc}"
+            log.error("run %d (%s) %s", member["n"], member["report_id"],
+                      member["error"])
+            yield _sse("error", f"Run {member['n']} {member['error']}")
+
+    summary = consensus.compare(members)
+    listing = [{k: m[k] for k in ("n", "seed", "report_id", "error")}
+               for m in members]
+    created = utcnow()
+    model = os.environ.get("TEXT_MODEL", "").strip()
+    body = consensus.render(summary, listing, created, model)
+    yield _sse("token", "\n\n" + body)
+
+    done_ids = [m["report_id"] for m in members if m["report_id"]]
+    report_id = consensus.save(done_ids, body, created) if done_ids else None
+    yield _sse("consensus", {"summary": summary, "runs": listing,
+                             "report_id": report_id})
+    if report_id:
+        yield _sse("done", {"report_id": report_id, "runs": runs})
+
+
 @app.post("/api/report")
 def api_report(payload: dict):
     goal = payload.get("goal")
     allegations = payload.get("allegations")
     if allegations is not None and not isinstance(allegations, list):
         raise HTTPException(status_code=400, detail="allegations must be a list")
+    runs = _runs_requested(payload.get("runs"))
+    # The corpus-integrity refusal is deliberate, so the override is deliberate
+    # too: it is off unless the operator asked for it on this request. Without a
+    # route into the running app the refusal cannot be cleared at all, and a
+    # worker that died mid-stage leaves a document that only a restart or a hand
+    # edit of the database can get past.
+    allow_incomplete = bool(payload.get("allow_incomplete"))
 
     def events():
         try:
-            for kind, data in report.generate(goal, allegations):
-                yield f"event: {kind}\ndata: {json.dumps(data)}\n\n"
+            yield from _report_runs(goal, allegations, runs, allow_incomplete)
         except Exception as exc:
             log.error("report stream failed: %s", exc)
-            yield f"event: error\ndata: {json.dumps(str(exc))}\n\n"
+            yield _sse("error", str(exc))
 
     return StreamingResponse(events(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache",

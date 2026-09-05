@@ -100,6 +100,11 @@ def relationships_for(question: str, passages: list[dict]) -> list[dict]:
                 "source_doc": fact.get("source_doc"),
                 "source_page": fact.get("source_page"),
                 "quote": fact.get("quote"),
+                # Carried through untouched so report generation can tell which
+                # allegation an assertion is testimony about. None means the
+                # assertion carried no marker and is available to every
+                # allegation, which is not the same as belonging to the first.
+                "allegation_ref": fact.get("allegation_ref"),
             })
             if len(facts) >= MAX_RELATIONSHIPS:
                 return facts
