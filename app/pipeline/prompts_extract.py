@@ -1,6 +1,6 @@
 """Extraction prompt contract.  Versioned like the transcription prompt."""
 
-PROMPT_VERSION = "extract/v6"
+PROMPT_VERSION = "extract/v8"
 
 ENTITY_TYPES = ["PERSON", "ORG", "LOCATION", "EVENT", "DOCUMENT", "CLAIM"]
 
@@ -24,6 +24,7 @@ Rules:
 - NEGATION IS SACRED. "never replied" must yield predicate "never replied to" - not predicate "replied" with the negation buried in the object, and never a double form like "replied never replied". Flipping a negative statement positive is the worst possible error here: it survives a skim and reverses a finding. The same for "did not", "refused to", "failed to", "denied".
 - BOUNDARIES ARE NOT DATES. "logged zero checks after 11 May" is a statement about the period AFTER that date - 11 May itself is a day the checks WERE logged. Keep after/before/since/until inside the assertion text ("logged zero weekly checks after 2026-05-11") and leave event_date null; event_date is only for something that happened ON a date.
 - Use the name exactly as the text writes it. Do not expand, normalise, or resolve abbreviations - "SSgt Smith" stays "SSgt Smith".
+- STATED NICKNAMES ARE FACTS. When the text says a person is called something else - "MSgt Brandt, who everyone calls Ox", "goes by Sofia", "we called him Doc" - emit an assertion with predicate "is also known as": subject the full name, object_type PERSON, object the nickname. A nickname cannot be inferred from spelling, so the only way it is ever known is that a document said it.
 - A JOB TITLE IS NOT A PERSON. "Civilian Network Administrator", "the section chief", "Equipment Test Craftsman", "the flight chief" are roles. If the text names the person holding the role, use the name; if it does not, skip the assertion rather than making the title into a person. Roles may be used as the OBJECT of a role assertion ("PERSON: Ana Reyes" / "holds the position of" / "CLAIM: Equipment Test Craftsman").
 - NEVER invent a name. Every subject_name and object_name must appear verbatim somewhere in this page or in the document header below. If you cannot name a person from the text, skip the assertion entirely.
 - Pronoun resolution in interview transcripts: "I", "me", "my" refer to the interviewee named in the document header. "You" inside an interviewer's question also refers to that interviewee. Resolve them to that person's name; never emit "I", "you", "the interviewee", or "unknown" as an entity name, and never substitute some other person's name.
@@ -35,6 +36,7 @@ Rules:
   * Convert 24-hour times: "0925" -> T09:25, "1540" -> T15:40, "at 1015" -> T10:15.
   * Resolve relative wording against the date established in the passage: "the same day", "that afternoon", "later that morning" take the date they refer back to.
   * If the text gives a time but no date anywhere, leave event_date null rather than inventing a date.
+  * "since August 2024" or "in March" names a MONTH, not a day. Emit the month with day 01 ONLY with event_date_basis "month" - never basis "stated", which claims the document gave a date it did not.
   * Preserve the text's own precision. "Around mid May" or "early June" is NOT a date - leave event_date null and let the quote carry the wording. Never sharpen an approximation into a specific day.
   * Resolve a relative expression ("the following Monday", "two days later") ONLY when the passage states the anchor date explicitly; otherwise null.
   * Never guess a year. Use null when the page does not state when it happened.

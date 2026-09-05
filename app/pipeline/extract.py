@@ -89,6 +89,29 @@ _HONORIFIC = re.compile(
     r"gen|mr|mrs|ms|miss|dr|sir|madam|civ)\b", re.I)
 
 
+def article_role(name: str, page_text: str, header: str) -> bool:
+    """True when the document refers to this name with a definite article.
+
+    Titles take articles and names do not: a page says "the Investigating
+    Officer" and "the flight chief", never "the Owen Brandt". This reads the
+    document's own grammar instead of consulting a vocabulary list, so it
+    catches roles in domains whose words were never anticipated - which is
+    exactly where a blacklist fails.
+    """
+    text = str(name or "").strip()
+    if not text or _HONORIFIC.match(text):
+        return False
+    blob = _WS.sub(" ", f"{page_text} {header}").lower()
+    bare = text.lower()
+    with_article = sum(blob.count(f"{a} {bare}") for a in ("the", "a", "an"))
+    if not with_article:
+        return False
+    # Count mentions that are NOT preceded by an article; a name used bare even
+    # once is being used as a name.
+    total = blob.count(bare)
+    return with_article >= total
+
+
 def looks_like_role(name: str) -> bool:
     """True when a PERSON name is really a job title.
 
@@ -240,6 +263,9 @@ def validate(item: dict, page_text: str, header: str = "") -> tuple[dict | None,
             return None, f"{role} {item[role]!r} does not appear in the document"
         if etype == "PERSON" and looks_like_role(str(item[role])):
             return None, f"{role} {item[role]!r} is a job title, not a person"
+        if etype == "PERSON" and article_role(str(item[role]), page_text, header):
+            return None, (f"{role} {item[role]!r} is only ever written with an "
+                          f"article, so it is a role rather than a name")
 
     subject_type = str(item["subject_type"]).strip().upper()
     object_type = str(item["object_type"]).strip().upper()
@@ -393,6 +419,38 @@ def rebuild_entities() -> int:
     return len(rows)
 
 
+def merge_stated_aliases() -> int:
+    """Apply nicknames the documents actually assert.
+
+    Spelling cannot reveal that Owen Brandt is called Ox; only a sentence can.
+    These merges are therefore evidence-backed rather than heuristic, and are
+    applied before the similarity pass so the alias is already resolved.
+    """
+    merged = 0
+    for row in state.query(
+            "SELECT subject_name, object_name FROM triples "
+            "WHERE predicate LIKE '%also known as%' OR predicate LIKE '%goes by%' "
+            "OR predicate LIKE '%is called%' OR predicate LIKE '%nicknamed%'"):
+        full, nick = row["subject_name"], row["object_name"]
+        if not full or not nick or normalize(full) == normalize(nick):
+            continue
+        keep = entity_id("PERSON", full)
+        lose = entity_id("PERSON", nick)
+        if keep == lose:
+            continue
+        target = state.query_one("SELECT 1 AS n FROM entities WHERE entity_id=?", (keep,))
+        source = state.query_one(
+            "SELECT merged_into FROM entities WHERE entity_id=?", (lose,))
+        if not target or not source or source["merged_into"]:
+            continue
+        with state.tx() as conn:
+            conn.execute("UPDATE entities SET merged_into=? WHERE entity_id=?",
+                         (keep, lose))
+        merged += 1
+        log.info("merged stated alias %s into %s", nick, full)
+    return merged
+
+
 def auto_merge(on_progress=lambda _m: None) -> int:
     """Fold obvious name variants together: Smith / SSgt Smith / J. Smith.
 
@@ -403,6 +461,7 @@ def auto_merge(on_progress=lambda _m: None) -> int:
     """
     from itertools import combinations
 
+    merge_stated_aliases()
     threshold = float(env_int("MERGE_THRESHOLD", 88))
     rows = state.query(
         "SELECT entity_id, entity_type, canonical_name, mention_count FROM entities "
@@ -417,7 +476,26 @@ def auto_merge(on_progress=lambda _m: None) -> int:
         if entity_type not in {"PERSON", "ORG", "LOCATION"} or len(group) < 2:
             continue
         norms = {r["entity_id"]: normalize(r["canonical_name"]) for r in group}
+
+        # A bare surname that fits two different people identifies neither.
+        # "Rivera" scores 90 against both "Sofia Rivera" and "Marcus Rivera",
+        # and merging into whichever was compared first silently attributes
+        # one person's conduct to the other - the worst error this pipeline
+        # can make, reached by trying to be helpful.
+        ambiguous: set[str] = set()
+        for candidate in group:
+            rivals = [other for other in group
+                      if other["entity_id"] != candidate["entity_id"]
+                      and _score(norms[candidate["entity_id"]],
+                                 norms[other["entity_id"]]) >= threshold]
+            if len(rivals) >= 2:
+                ambiguous.add(candidate["entity_id"])
+                log.info("%s matches %d people; left unmerged as ambiguous",
+                         candidate["canonical_name"], len(rivals))
+
         for a, b in combinations(group, 2):
+            if a["entity_id"] in ambiguous or b["entity_id"] in ambiguous:
+                continue
             score = _score(norms[a["entity_id"]], norms[b["entity_id"]])
             if score < threshold:
                 continue

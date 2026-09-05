@@ -1,0 +1,231 @@
+{
+  "meta": {
+    "case_id": "CDI-2026-07",
+    "purpose": "Ground truth answer key, case two. Tests exculpatory evidence routing, complainant credibility, motive weighting, hearsay chains, and mitigation vs negation. Fictional training data.",
+    "version": "1.0",
+    "standard_of_proof": "preponderance_of_evidence",
+    "disposition_labels": ["SUBSTANTIATED", "NOT_SUBSTANTIATED"],
+    "headline_check": "A tool that substantiates everything fails this case. A1 must return NOT_SUBSTANTIATED."
+  },
+
+  "documents": [
+    {"doc_id": "C2_05", "file_match": "C2_05_Interview_Mercer_Complainant", "interviewee": "mercer", "status": "witness_complainant"},
+    {"doc_id": "C2_06", "file_match": "C2_06_Interview_Rao_Witness", "interviewee": "rao", "status": "witness"},
+    {"doc_id": "C2_07", "file_match": "C2_07_Interview_Whitcomb_Witness", "interviewee": "whitcomb", "status": "witness"},
+    {"doc_id": "C2_08", "file_match": "C2_08_Interview_SRivera_Witness", "interviewee": "srivera", "status": "witness_hearsay_only"},
+    {"doc_id": "C2_09", "file_match": "C2_09_Interview_Osei_GTC", "interviewee": "osei", "status": "records_custodian_civilian"},
+    {"doc_id": "C2_10", "file_match": "C2_10_Interview_Hahn_FlightChief", "interviewee": "hahn", "status": "witness_supervisor"},
+    {"doc_id": "C2_11", "file_match": "C2_11_Interview_Brandt_Subject", "interviewee": "brandt", "status": "subject"}
+  ],
+
+  "entities": {
+    "expected_person_count": 9,
+    "persons": [
+      {"id": "brandt", "canonical": "MSgt Owen T. Brandt", "role": "NCOIC, Vehicle Test Flight, subject", "aliases": ["Brandt", "MSgt Brandt", "Ox", "the NCOIC", "I (doc C2_11 answers)"], "alias_trap": "Callsign Ox used by every witness must resolve to brandt, not a separate entity"},
+      {"id": "mercer", "canonical": "SrA Colin R. Mercer", "role": "Vehicle Test Technician, complainant", "aliases": ["Mercer", "SrA Mercer", "I (doc C2_05 answers)"]},
+      {"id": "rao", "canonical": "SSgt Priya N. Rao", "role": "Vehicle Test Craftsman", "aliases": ["Rao", "SSgt Rao", "I (doc C2_06 answers)"]},
+      {"id": "whitcomb", "canonical": "SrA Jamie L. Whitcomb", "role": "Vehicle Test Technician", "aliases": ["Whitcomb", "I (doc C2_07 answers)"]},
+      {"id": "srivera", "canonical": "A1C Sofia Rivera", "role": "Vehicle Test Apprentice, hearsay conduit only", "aliases": ["Sofia", "A1C Rivera", "Rivera (context: apprentice)", "I (doc C2_08 answers)"], "no_merge_trap": "Must NOT merge with mrivera. Explicitly unrelated, stated in doc C2_08."},
+      {"id": "mrivera", "canonical": "TSgt Marcus Rivera", "role": "Vehicle dispatch, provided badge records, not interviewed", "aliases": ["TSgt Rivera", "Rivera (context: dispatch)"], "no_merge_trap": "Must NOT merge with srivera"},
+      {"id": "osei", "canonical": "Ms. Gail T. Osei", "role": "GS-11 Financial Analyst, GTC APC", "aliases": ["Osei", "Ms. Osei", "the APC", "I (doc C2_09 answers)"]},
+      {"id": "hahn", "canonical": "SMSgt Victor L. Hahn", "role": "Flight Chief", "aliases": ["Hahn", "SMSgt Hahn", "I (doc C2_10 answers)"]},
+      {"id": "reyes", "canonical": "Capt Dana M. Reyes", "role": "Investigating Officer", "aliases": ["the IO", "IO (all docs, question speaker)"]}
+    ],
+    "peripheral_mentions_not_required": ["Maj Elena V. Cross (appointing authority)", "SSgt Okonkwo (declined move, no consequence)", "SrA Tate (declined move, no consequence)", "Brandt's brother (loan source)", "Brandt's neighbors (unnamed)"],
+    "forbidden_entities_examples": ["any name not listed above"]
+  },
+
+  "allegations": [
+    {
+      "id": "A1",
+      "label": "improper_use_of_subordinates",
+      "text_key": "directing subordinates to perform personal errands and move household goods, 1 Apr to 31 Jul 2026, JER and Article 93",
+      "expected_disposition": "NOT_SUBSTANTIATED",
+      "reasoning_key": [
+        "Moves were off duty Saturdays (18 Apr, 2 May), explicitly voluntary, compensated, with declines suffering no consequence (F03, F04, F05, F06)",
+        "Complainant credibility damaged: complaint claimed duty days in June, retracted under questioning against schedule records (F02, C1)",
+        "Complainant attended only the first move despite complaint implying both (F05)",
+        "Motive: LOR issued 4 Aug, complaint filed 18 Aug, complainant partially concedes causation (F09, C2)",
+        "Single de minimis dry cleaning drop is conceded by subject but one trivial consensual instance does not establish the alleged pattern of improper use (F07, proportionality)"
+      ],
+      "primary_source_docs": ["C2_07", "C2_06"],
+      "note": "Findings of fact should still record the dry cleaning instance. Recording it while concluding NOT_SUBSTANTIATED is the expected sophisticated behavior."
+    },
+    {
+      "id": "A2",
+      "label": "gtc_misuse",
+      "text_key": "personal GTC charges and cash advances while not on official travel, 1 Jun to 31 Jul 2026",
+      "expected_disposition": "SUBSTANTIATED",
+      "reasoning_key": [
+        "Certified statements: 9 transactions, $1,847.62 total, incl 4 casino cash advances totaling $800 (F10)",
+        "No travel orders in DTS 1 May to 31 Jul (F11, negation)",
+        "Full admission by subject, all charges personal (F13)",
+        "Repayment on 30 Jul is mitigation, not authorization (F12, F14)"
+      ],
+      "primary_source_docs": ["C2_09"]
+    },
+    {
+      "id": "A3",
+      "label": "false_official_statement",
+      "text_key": "28 Jul 2026 email to Flight Chief denying any personal GTC use, Article 107",
+      "expected_disposition": "SUBSTANTIATED",
+      "reasoning_key": [
+        "Email thread exhibit: 0912 reply, I have not used my GTC for any personal expenses (F15)",
+        "Statement contradicted by certified GTC records (F10, F11)",
+        "Subject admission: false and known false when sent (F16)",
+        "Full repayment two days later corroborates consciousness of falsity (F12)"
+      ],
+      "primary_source_docs": ["C2_10"]
+    }
+  ],
+
+  "gold_facts": [
+    {"id": "F01", "text": "Brandt NCOIC of Vehicle Test Flight since Aug 2024, known by callsign Ox", "primary_doc": "C2_11", "corroborating_docs": ["C2_05", "C2_06", "C2_10"], "allegations": ["A1", "A2", "A3"], "date_precision": "month"},
+    {"id": "F02", "text": "Mercer written complaint (18 Aug) claimed moves occurred on duty days in June; under interview, retracted to spring, maybe weekends, when confronted with duty schedules", "primary_doc": "C2_05", "corroborating_docs": [], "allegations": ["A1"], "credibility_note": "Retraction under questioning"},
+    {"id": "F03", "text": "Moves occurred Saturdays 18 Apr and 2 May 2026, off duty, at Brandt residence", "primary_doc": "C2_06", "corroborating_docs": ["C2_07", "C2_11"], "allegations": ["A1"]},
+    {"id": "F04", "text": "Group chat invitation stated fifty bucks and pizza, nothing to do with work, no sweat either way; thread preserved as Exhibit 1", "primary_doc": "C2_07", "corroborating_docs": ["C2_06", "C2_11"], "allegations": ["A1"], "exculpatory": true},
+    {"id": "F05", "text": "Mercer replied count me in Saturday within minutes and attended first move only; second move was Rao, Whitcomb, neighbors", "primary_doc": "C2_07", "corroborating_docs": ["C2_06", "C2_05"], "allegations": ["A1"], "exculpatory": true, "negation_trap": "Mercer did NOT attend the 2 May move"},
+    {"id": "F06", "text": "Okonkwo and Tate declined to attend with no adverse consequence; all attendees paid $50 (payment screenshots Exhibit 2)", "primary_doc": "C2_07", "corroborating_docs": ["C2_11"], "allegations": ["A1"], "exculpatory": true},
+    {"id": "F07", "text": "Single dry cleaning drop: Brandt asked Mercer to drop service dress at cleaners near the gate during duty hours in May; Mercer complied; subject concedes and calls it thoughtless", "primary_doc": "C2_11", "corroborating_docs": ["C2_05", "C2_06", "C2_07"], "allegations": ["A1"], "note": "True but de minimis; insufficient alone for the alleged pattern"},
+    {"id": "F08", "text": "No prior complaint about Brandt using subordinates for personal benefit in two years; he routinely refuses even small personal assistance", "primary_doc": "C2_10", "corroborating_docs": ["C2_06"], "allegations": ["A1"], "exculpatory": true},
+    {"id": "F09", "text": "Brandt issued Mercer a warranted LOR on 4 Aug 2026 (six late arrivals over five weeks, badge records from TSgt Marcus Rivera); Mercer filed complaint 18 Aug, 14 days later, and partially concedes the LOR prompted the filing", "primary_doc": "C2_10", "corroborating_docs": ["C2_05", "C2_06"], "allegations": ["A1"], "motive_evidence": true},
+    {"id": "F10", "text": "Certified GTC statements 6 Jun to 19 Jul 2026: 9 transactions, $1,847.62 total; 4 casino ATM cash advances (Henderson NV) totaling $800 on 6 Jun, 20 Jun, 3 Jul, 17 Jul; 3 restaurant charges $412.88; 2 rideshare $634.74; Exhibit 3", "primary_doc": "C2_09", "corroborating_docs": ["C2_11"], "allegations": ["A2", "A3"], "numeric": {"transactions": 9, "total": 1847.62, "advances": 4, "advance_total": 800.00, "restaurants": 412.88, "rideshare": 634.74}, "sourcing_trap": "Primary is C2_09, not subject restatement"},
+    {"id": "F11", "text": "DTS shows no travel orders or authorizations for Brandt 1 May to 31 Jul 2026; Exhibit 4", "primary_doc": "C2_09", "corroborating_docs": ["C2_11"], "allegations": ["A2", "A3"], "negation_trap": "Fact is the ABSENCE of orders. Must not become Brandt was on orders or DTS shows travel."},
+    {"id": "F12", "text": "Full balance $1,847.62 paid in one payment 30 Jul 2026, two days after the denial email; Exhibit 9; funds borrowed from brother", "primary_doc": "C2_09", "corroborating_docs": ["C2_10", "C2_11"], "allegations": ["A2", "A3"], "note": "Mitigation not negation; also corroborates A3 consciousness of falsity"},
+    {"id": "F13", "text": "Brandt admits all nine charges are his and personal, no official nexus, knew the rules, cites undetailed family financial hardship; never disputed or reported fraud", "primary_doc": "C2_11", "corroborating_docs": ["C2_09"], "allegations": ["A2"]},
+    {"id": "F14", "text": "APC flag 24 Jul, referral to Hahn 27 Jul; APC position: repayment resolves the debt, not the misuse", "primary_doc": "C2_09", "corroborating_docs": ["C2_10"], "allegations": ["A2"]},
+    {"id": "F15", "text": "28 Jul 2026: Hahn official email 0730 asking Brandt to account for GTC activity; Brandt reply 0912 same day: I have not used my GTC for any personal expenses, must be an error, I will call the bank; Exhibit 5", "primary_doc": "C2_10", "corroborating_docs": ["C2_11"], "allegations": ["A3"]},
+    {"id": "F16", "text": "Brandt admits the 28 Jul statement was false and known false when sent; rejects poorly worded characterization; states he panicked and hoped repayment would bury it", "primary_doc": "C2_11", "corroborating_docs": [], "allegations": ["A3"]},
+    {"id": "F17", "text": "31 Jul in person: Brandt tells Hahn I handled it, it will not happen again; never mentions calling the bank again; Hahn escalates to commander", "primary_doc": "C2_10", "corroborating_docs": [], "allegations": ["A3"]},
+    {"id": "F18", "text": "Sofia Rivera has zero firsthand knowledge; all her information traces to Mercer post LOR; she self identifies as the rumor conduit; Mercer's GTC knowledge likewise secondhand via her", "primary_doc": "C2_08", "corroborating_docs": ["C2_05", "C2_07"], "allegations": ["A1", "A2"], "hearsay_chain": "finance rumor -> mercer -> srivera -> flight; no probative value"},
+    {"id": "F19", "text": "Hahn: July hypothetical question from Brandt about Air Force Aid Society, retrospectively consistent with financial distress", "primary_doc": "C2_10", "corroborating_docs": [], "allegations": ["A2"], "note": "Context only"},
+    {"id": "F20", "text": "Mercer characterizes rank pressure as inherent (he is the NCOIC) rather than any express order; concedes no order was stated", "primary_doc": "C2_05", "corroborating_docs": [], "allegations": ["A1"]}
+  ],
+
+  "expected_conflicts": [
+    {
+      "id": "C1",
+      "name": "complaint_vs_testimony_dates",
+      "facts": ["F02", "F03"],
+      "positions": {"mercer_complaint": "duty days in June", "mercer_interview": "spring, maybe weekends", "rao_whitcomb": "Saturdays 18 Apr and 2 May, off duty"},
+      "expected_resolution": "Complaint's central factual claim (duty time) collapses against schedules, witness testimony, and complainant's own retraction. Major credibility hit to complainant on A1.",
+      "weight": "high"
+    },
+    {
+      "id": "C2",
+      "name": "complainant_motive",
+      "facts": ["F09"],
+      "positions": {"mercer": "LOR was garbage, but concedes it prompted the filing", "hahn_rao": "LOR warranted and documented; timing noted by both"},
+      "expected_resolution": "Motive does not automatically falsify a complaint, but combined with C1 and the exculpatory record, complainant testimony cannot carry preponderance on A1.",
+      "weight": "high",
+      "type": "credibility_annotation"
+    },
+    {
+      "id": "C3",
+      "name": "voluntariness_dispute",
+      "facts": ["F04", "F05", "F06", "F20"],
+      "positions": {"mercer": "implicit rank pressure, could not refuse", "rao_whitcomb_brandt": "explicitly voluntary, paid, declines unpunished", "documentary": "chat thread and payment screenshots"},
+      "expected_resolution": "Implicit pressure theory defeated by contemporaneous documentary evidence and two unpunished declines. Resolves against complainant.",
+      "weight": "high"
+    },
+    {
+      "id": "C4",
+      "name": "bank_error_claim_vs_admission",
+      "facts": ["F15", "F16", "F12"],
+      "positions": {"brandt_28jul": "must be an error, I will call the bank", "brandt_interview": "statement false and known false; charges all mine"},
+      "expected_resolution": "The 28 Jul denial is itself the A3 misconduct, not a live factual dispute; interview admission plus repayment timing resolve it.",
+      "weight": "medium"
+    },
+    {
+      "id": "C5",
+      "name": "hearsay_chain_gtc",
+      "facts": ["F18"],
+      "positions": {},
+      "expected_resolution": "Mercer and S. Rivera GTC statements carry no independent weight; A2 rests entirely on certified records and subject admission. Tool should show A2 unaffected by excluding the hearsay.",
+      "weight": "low",
+      "type": "credibility_annotation"
+    }
+  ],
+
+  "expected_gaps": [
+    {"id": "G1", "text": "SSgt Okonkwo and SrA Tate (the two who declined the moves) were named but not interviewed; would further corroborate voluntariness", "source_doc": "C2_07"},
+    {"id": "G2", "text": "Duty schedule records referenced when confronting complainant were not marked as an exhibit in the interview set", "source_doc": "C2_05"},
+    {"id": "G3", "text": "Nature of the family financial hardship undetailed; relevant to mitigation only, not elements", "source_doc": "C2_11"}
+  ],
+
+  "timeline_gold": [
+    {"date": "2024-08", "precision": "month", "event": "Brandt becomes NCOIC", "docs": ["C2_11"]},
+    {"date": "2025-01", "precision": "month", "event": "Mercer joins flight", "docs": ["C2_05"]},
+    {"date": "2026-04-18", "precision": "day", "event": "Move one, Saturday, off duty: Rao, Whitcomb, Mercer, neighbors; $50 and pizza", "docs": ["C2_06", "C2_07", "C2_11"]},
+    {"date": "2026-05-02", "precision": "day", "event": "Move two, Saturday: Rao and Whitcomb only; Mercer absent", "docs": ["C2_06", "C2_07"]},
+    {"date": "2026-05", "precision": "month", "event": "Single dry cleaning drop by Mercer at Brandt request during duty hours", "docs": ["C2_11", "C2_05", "C2_06"]},
+    {"date": "2026-06-06", "precision": "day", "event": "First casino cash advance", "docs": ["C2_09"]},
+    {"date": "2026-06-20", "precision": "day", "event": "Second casino cash advance", "docs": ["C2_09"]},
+    {"date": "2026-07-03", "precision": "day", "event": "Third casino cash advance", "docs": ["C2_09"]},
+    {"date": "2026-07", "precision": "month", "event": "Brandt asks Hahn hypothetical about Air Force Aid Society", "docs": ["C2_10"]},
+    {"date": "2026-07-17", "precision": "day", "event": "Fourth casino cash advance", "docs": ["C2_09"]},
+    {"date": "2026-07-24", "precision": "day", "event": "APC flags June statement", "docs": ["C2_09"]},
+    {"date": "2026-07-27", "precision": "day", "event": "APC referral to Hahn", "docs": ["C2_09", "C2_10"]},
+    {"date": "2026-07-28", "precision": "day", "event": "Hahn email 0730; Brandt false denial reply 0912", "docs": ["C2_10", "C2_11"]},
+    {"date": "2026-07-30", "precision": "day", "event": "Full balance $1,847.62 paid", "docs": ["C2_09", "C2_10", "C2_11"]},
+    {"date": "2026-07-31", "precision": "day", "event": "Brandt to Hahn in person: I handled it; Hahn escalates to commander", "docs": ["C2_10"]},
+    {"date": "2026-08-04", "precision": "day", "event": "Brandt issues Mercer LOR (six late arrivals, badge records)", "docs": ["C2_10", "C2_05"]},
+    {"date": "2026-08-18", "precision": "day", "event": "Mercer files written complaint", "docs": ["C2_05", "C2_10"]},
+    {"date": "2026-08-21", "precision": "day", "event": "CDI initiated, IO appointed", "docs": ["plan"]},
+    {"date": "2026-08-26", "precision": "day", "event": "Mercer 0900 and Rao 1300 interviews", "docs": ["C2_05", "C2_06"]},
+    {"date": "2026-08-27", "precision": "day", "event": "Whitcomb 0900 and S. Rivera 1300 interviews", "docs": ["C2_07", "C2_08"]},
+    {"date": "2026-08-28", "precision": "day", "event": "Osei 1000 and Hahn 1400 interviews", "docs": ["C2_09", "C2_10"]},
+    {"date": "2026-09-01", "precision": "day", "event": "Subject interview 0900, rights waived 0903, concluded 1015", "docs": ["C2_11"]}
+  ],
+
+  "trap_inventory": {
+    "disposition": [
+      "A1 must be NOT_SUBSTANTIATED despite a partially true underlying fact (F07). Substantiating A1 on the dry cleaning drop alone is a proportionality failure.",
+      "A2 must not be downgraded because of repayment (F12). Mitigation vs negation.",
+      "Exactly 3 allegations; objective is not an allegation."
+    ],
+    "coreference": [
+      "Ox resolves to brandt in every document",
+      "Two Riveras: srivera (apprentice, interviewed) and mrivera (dispatch, records provider, not interviewed) must remain distinct",
+      "First person I resolves to each document's interviewee"
+    ],
+    "negation": [
+      "F11: NO travel orders exist in DTS for the window",
+      "F05: Mercer did NOT attend the 2 May move",
+      "Brandt never disputed any transaction and never filed a fraud report",
+      "Okonkwo and Tate declined and suffered NO consequence"
+    ],
+    "date_precision": [
+      "since August 2024 and since January 2025 stay month precision",
+      "dry cleaning drop is May 2026, month precision only",
+      "AFAS hypothetical is July 2026, month precision only",
+      "Rao's tax day anchor is color, not a separate event"
+    ],
+    "sourcing": [
+      "F10, F11, F12 primary source is C2_09; subject restatements in C2_11 are secondary",
+      "F15 primary source is C2_10 (exhibit holder)"
+    ],
+    "hearsay_chains": [
+      "GTC rumor: unnamed finance source -> Mercer -> S. Rivera -> flight; zero probative weight",
+      "Hahn's knowledge of the moves is entirely secondhand",
+      "S. Rivera's knowledge of the moves is entirely secondhand from Mercer, post LOR"
+    ],
+    "exculpatory_routing": [
+      "F04, F05, F06, F08 are exculpatory on A1 and must appear in A1 analysis, not be dropped as irrelevant to a misconduct hypothesis",
+      "Tool must weigh evidence against the allegation, not only collect support for it"
+    ]
+  },
+
+  "scoring": {
+    "disposition_accuracy": {"metric": "exact match A1 A2 A3", "pass_threshold": "3/3", "critical": "A1=NOT_SUBSTANTIATED is the headline assertion of this case"},
+    "entity_resolution": {"metric": "precision and recall vs persons list, incl Ox merge and Rivera split", "pass_threshold": "P=1.0, R>=8/9, ox_merge=pass, rivera_split=pass"},
+    "fact_recall": {"metric": "gold facts recalled with correct citation", "pass_threshold": ">=16/20"},
+    "exculpatory_recall": {"metric": "facts tagged exculpatory appearing in A1 analysis", "pass_threshold": "3/4"},
+    "negation_accuracy": {"metric": "negation trap polarity", "pass_threshold": "4/4"},
+    "conflict_recall": {"metric": "expected conflicts detected", "pass_threshold": ">=4/5 including C1 and C3"},
+    "credibility_handling": {"metric": "complainant credibility and motive surfaced in A1 analysis; hearsay chain excluded from probative weight", "pass_threshold": "both present"},
+    "numeric_fidelity": {"metric": "F10 numeric fields exact", "pass_threshold": "6/6 values exact"},
+    "date_accuracy": {"metric": "timeline events within stated precision, zero precision upgrades", "pass_threshold": ">=19/22"},
+    "summary_consistency": {"metric": "summary dispositions match findings sections by allegation id", "pass_threshold": "exact"}
+  }
+}

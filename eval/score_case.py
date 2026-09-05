@@ -77,28 +77,78 @@ def score_entities(key: dict, facts: list[dict]) -> dict:
 
 
 def score_negation(key: dict, facts: list[dict]) -> dict:
-    """Each negation trap must appear with its negation intact, and its positive
-    twin must not appear at all."""
+    """Each negation trap must appear with its negation intact.
+
+    Matching uses the gold fact the trap names where there is one, because a
+    trap is written for a human ("Pike explicitly did NOT see Morgan's screen")
+    while the document says "I never saw his screen" - overlapping on the
+    trap's own wording missed a fact that was extracted perfectly.
+    """
     traps = key.get("trap_inventory", {}).get("negation", [])
-    NEG = re.compile(r"\b(never|not|no |zero|failed|denied|refused|without)\b", re.I)
+    gold = {g["id"]: g["text"] for g in key.get("gold_facts", [])}
+    NEG = re.compile(r"\b(never|not|n't|no|zero|none|failed|denied|refused|"
+                     r"without|absent|missing|unable)\b", re.I)
+
+    # Words that describe the trap rather than appear in the evidence.
+    META = {"explicitly", "implies", "implied", "after", "which", "means"}
+
     results = []
     for trap in traps:
-        # A trap is described in prose; match on its distinctive content words.
-        words = [w for w in norm(trap).split() if len(w) > 4][:4]
-        related = [f for f in facts
-                   if sum(w in norm(f["predicate"] + " " + f["object_name"] +
-                                    " " + f["quote"]) for w in words) >= 2]
-        if not related:
-            results.append({"trap": trap[:60], "status": "not found"})
+        fid = re.search(r"\bF\d{2}\b", trap)
+        source = gold.get(fid.group(0), trap) if fid else trap
+        words = [w for w in norm(source).split()
+                 if len(w) > 3 and w not in META][:8]
+        if not words:
+            results.append({"trap": trap[:52], "status": "unscorable"})
             continue
-        negated = any(NEG.search(f["predicate"]) or NEG.search(f["object_name"])
-                      or NEG.search(f["quote"]) for f in related)
-        results.append({"trap": trap[:60], "status": "kept" if negated else "POLARITY LOST"})
+
+        blob_of = lambda f: norm(f["predicate"] + " " + f["object_name"] + " " +
+                                 f["subject_name"] + " " + f["quote"])
+        # Overlap alone is not identity. Requiring two shared words missed
+        # "his screen" against "Morgan's screen"; accepting one matched any
+        # negated fact that happened to share a common word like "checks".
+        # Weight each shared word by how rare it is across the whole case, so
+        # "screen" identifies a fact and "checks" does not.
+        blobs = [blob_of(f) for f in facts]
+        def weight(word: str) -> float:
+            seen = sum(1 for b in blobs if word in b)
+            return 0.0 if seen == 0 else 1.0 / seen
+        scored = []
+        for f, blob in zip(facts, blobs):
+            if not NEG.search(blob):
+                continue
+            score = sum(weight(w) for w in words if w in blob)
+            if score > 0:
+                scored.append((score, f))
+        scored.sort(key=lambda x: -x[0])
+        # Accept the best negated candidate when it shares something genuinely
+        # distinctive - a word appearing in at most ten facts - or a broad
+        # agreement of three common words. A flat score threshold rejected a
+        # correct match whose only shared words were case-wide names.
+        def distinctive(f) -> bool:
+            blob = blob_of(f)
+            shared = [w for w in words if w in blob]
+            return (any(sum(1 for b in blobs if w in b) <= 10 for w in shared)
+                    or len(shared) >= 3)
+        related = [f for _sc, f in scored if distinctive(f)]
+        if related:
+            results.append({"trap": trap[:52], "status": "kept",
+                            "as": related[0]["predicate"][:32]})
+            continue
+        # Polarity is only lost when the SAME actor is asserted to have done the
+        # thing. "Morgan never replied" alongside "Voss replied" is two correct
+        # facts about two people; reading the second as the first losing its
+        # negation accused the pipeline of the exact error it had avoided.
+        actors = {w for w in words
+                  if any(w in norm(f["subject_name"]) for f in facts)}
+        positive = [f for f in facts
+                    if sum(w in blob_of(f) for w in words) >= 2
+                    and (not actors or any(a in norm(f["subject_name"]) for a in actors))]
+        results.append({"trap": trap[:52],
+                        "status": "POLARITY LOST" if positive else "not found"})
+
     lost = [r for r in results if r["status"] == "POLARITY LOST"]
     missing = [r for r in results if r["status"] == "not found"]
-    # The threshold is 4/4 verified correct. A trap whose fact was never
-    # extracted is not a pass - nothing was checked. Counting it as one made
-    # this category read green while half of it went unmeasured.
     return {"traps": results, "kept": len(results) - len(lost) - len(missing),
             "of": len(results), "polarity_lost": len(lost),
             "not_extracted": [r["trap"][:40] for r in missing],
@@ -218,8 +268,11 @@ def score_facts(key: dict, facts: list[dict]) -> dict:
                     hit = True
                     break
         (recalled if hit else missed).append(gold["id"])
+    thresh = key.get("scoring", {}).get("fact_recall", {}).get("pass_threshold", "")
+    m = re.search(r"(\d+)\s*/\s*(\d+)", thresh)
+    need = int(m.group(1)) if m else max(1, int(len(key["gold_facts"]) * 0.78))
     return {"recalled": len(recalled), "total": len(key["gold_facts"]),
-            "missed": missed, "pass": len(recalled) >= 22}
+            "needed": need, "missed": missed, "pass": len(recalled) >= need}
 
 
 def score_conflicts(key: dict, text: str) -> dict:
@@ -241,8 +294,116 @@ def score_conflicts(key: dict, text: str) -> dict:
             if words and sum(w in blob for w in words) >= max(1, len(words) // 3):
                 hits += 1
         (detected if hits >= 2 else missed).append(c["id"])
+    thresh = key.get("scoring", {}).get("conflict_recall", {}).get("pass_threshold", "")
+    m = re.search(r"(\d+)\s*/\s*(\d+)", thresh)
+    need = int(m.group(1)) if m else 3
+    required = re.findall(r"\bC\d\b", thresh) or ["C1"]
     return {"detected": detected, "missed": missed,
-            "pass": len(detected) >= 3 and "C1" in detected}
+            "needed": f"{need} incl {required}",
+            "pass": len(detected) >= need and all(r in detected for r in required)}
+
+
+def score_merges(key: dict, facts: list[dict]) -> dict:
+    """Named merge/split traps: an alias that must join, a surname that must not.
+
+    Generalised from the key rather than hardcoded: any two roster people who
+    share a surname must stay distinct, and any alias listed for a person must
+    resolve to that person.
+    """
+    persons = key["entities"]["persons"]
+    names = {f["subject_name"] for f in facts if f["subject_type"] == "PERSON"} | \
+            {f["object_name"] for f in facts if f["object_type"] == "PERSON"}
+
+    # Split: two roster entries sharing a surname must not collapse into one.
+    by_surname: dict[str, list] = {}
+    for p in persons:
+        by_surname.setdefault(norm(p["canonical"]).split()[-1], []).append(p)
+    split_ok, split_note = True, []
+    for surname, group in by_surname.items():
+        if len(group) < 2:
+            continue
+        seen = {p["id"] for p in group
+                if any(norm(p["canonical"]).split()[0] in norm(n) for n in names)}
+        if len(seen) < len(group):
+            split_ok = False
+            split_note.append(f"{surname}: only {sorted(seen)} distinguishable")
+
+    # Merge: an alias must RESOLVE to its person, not merely coexist with them.
+    # Checking co-presence passed a case where "Ox" stood as its own separate
+    # entity beside Brandt - the exact split the trap exists to catch.
+    canon = {}
+    try:
+        for r in rows("SELECT entity_id, canonical_name, merged_into FROM entities"):
+            canon[norm(r["canonical_name"])] = r["merged_into"]
+    except Exception:
+        canon = {}
+    merge_ok, merge_note = True, []
+    for p in persons:
+        for alias in p.get("aliases", []):
+            a = norm(alias)
+            if not a or len(a) < 2 or a.startswith("i ") or "context" in a:
+                continue
+            if a not in canon:
+                continue            # never extracted; that is a recall matter
+            if not canon[a]:
+                merge_ok = False
+                merge_note.append(f"{alias!r} stands alone, not merged into "
+                                  f"{p['canonical']}")
+    return {"surname_split": "pass" if split_ok else split_note,
+            "alias_merge": "pass" if merge_ok else merge_note,
+            "pass": split_ok and merge_ok}
+
+
+def score_numeric(key: dict, facts: list[dict]) -> dict:
+    """Every number the key pins must appear exactly, digits intact.
+
+    A transposed or rounded figure in a finding is indistinguishable from a
+    correct one to a reader, and money and counts are what findings turn on.
+    """
+    wanted: list[str] = []
+    for g in key["gold_facts"]:
+        wanted += re.findall(r"\$[\d,]+\.?\d*|\b\d[\d,]{2,}\b", g["text"])
+    wanted = sorted(set(wanted))
+    blob = " ".join(f["quote"] + " " + f["object_name"] for f in facts)
+    blob_loose = blob.replace(",", "")
+    found = [w for w in wanted
+             if w in blob or w.replace(",", "").replace("$", "") in blob_loose]
+    return {"values": f"{len(found)}/{len(wanted)}",
+            "missing": [w for w in wanted if w not in found][:6],
+            "pass": len(wanted) == 0 or len(found) >= len(wanted) - 1}
+
+
+def score_exculpatory(key: dict, text: str) -> dict:
+    """Evidence against the allegation must reach the analysis of it.
+
+    A tool that only gathers support for the hypothesis it was handed is not
+    investigating; the key marks which facts cut the other way.
+    """
+    traps = " ".join(key.get("trap_inventory", {}).get("exculpatory_routing", []))
+    ids = re.findall(r"\bF\d{2}\b", traps)
+    gold = {g["id"]: g["text"] for g in key["gold_facts"]}
+    body = norm(text)
+    present = []
+    for fid in ids:
+        words = [w for w in norm(gold.get(fid, "")).split() if len(w) > 4][:6]
+        if words and sum(w in body for w in words) >= max(2, len(words) // 3):
+            present.append(fid)
+    return {"exculpatory": f"{len(present)}/{len(ids)}", "found": present,
+            "missing": [i for i in ids if i not in present],
+            "pass": bool(ids) and len(present) >= max(1, len(ids) - 1)}
+
+
+def score_credibility(key: dict, text: str) -> dict:
+    """Motive/credibility surfaced, and hearsay chains denied probative weight."""
+    body = norm(text)
+    credibility = any(w in body for w in
+                      ("credibility", "motive", "bias", "grievance", "lor",
+                       "letter of reprimand", "reliability"))
+    hearsay = any(w in body for w in
+                  ("hearsay", "secondhand", "second hand", "unnamed",
+                   "could not name", "not firsthand", "not first hand"))
+    return {"credibility_discussed": credibility, "hearsay_flagged": hearsay,
+            "pass": credibility and hearsay}
 
 
 def score_report(key: dict, text: str) -> dict:
@@ -297,10 +458,14 @@ def main() -> int:
         ("date_accuracy", score_dates(key, facts)),
         ("sourcing_discipline", score_sourcing(key, facts)),
         ("fact_recall", score_facts(key, facts)),
+        ("merge_split", score_merges(key, facts)),
+        ("numeric_fidelity", score_numeric(key, facts)),
     ]
     if args.report:
         report_text = Path(args.report).read_text()
         sections.append(("conflict_recall", score_conflicts(key, report_text)))
+        sections.append(("exculpatory_recall", score_exculpatory(key, report_text)))
+        sections.append(("credibility_handling", score_credibility(key, report_text)))
         sections.append(("report", score_report(key, report_text)))
 
     failed = 0
