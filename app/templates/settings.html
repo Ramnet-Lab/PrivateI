@@ -161,23 +161,23 @@
 
 <h1 style="margin-top: 36px">Reading images</h1>
 
-{# Vision is a different model and may live somewhere different, so it gets its
-   own banner rather than a clause in the text model's. An operator who pointed
-   the text model at their own server and read "in force: an external endpoint"
-   had every reason to believe transcription had moved with it. It had not, and
-   the error that eventually surfaced named an environment variable they had
-   never set. #}
-{% if not vision.is_set %}
+{# Vision is a different model, and it may live somewhere different, so it gets
+   its own banner rather than a clause in the text model's. An operator who
+   pointed the text model at their own server and read "in force: an external
+   endpoint" had every reason to believe transcription had moved with it. It had
+   not, and the error that eventually surfaced named an environment variable
+   they had never set. #}
+{% if not vision.model.value %}
 <p class="notice" id="vision-in-force">
   <strong>In force: nothing will read images.</strong>
   No vision model is set, so a scanned or photographed page cannot be
-  transcribed and is left unread. Nothing else is affected.
+  transcribed and is left unread.
 </p>
-{% elif vision.is_external %}
-<p class="notice {% if not vision.url.value %}bad{% endif %}" id="vision-in-force">
+{% elif cfg.is_vision_external %}
+<p class="notice {% if not cfg.stored_url %}bad{% endif %}" id="vision-in-force">
   <strong>In force: an external endpoint reads images.</strong>
-  {{ vision.model.value }} at {{ vision.url.value or 'no address saved' }}.
-  {% if vision.url.value %}
+  {{ vision.model.value }} at {{ cfg.stored_url or 'no address saved' }}.
+  {% if cfg.stored_url %}
   Page images are sent there.
   {% else %}
   Every page image fails until an endpoint address is saved under Text model
@@ -187,16 +187,16 @@
 {% else %}
 <p class="notice ok" id="vision-in-force">
   <strong>In force: the built-in local runner reads images.</strong>
-  {{ vision.model.value }} on {{ vision.url.value }} &mdash;
+  {{ vision.model.value }} &mdash;
   <span class="tag">{{ vision.model.source }}</span>.
   Page images stay on this machine.
 </p>
 {% endif %}
 
 {# Worth a line of its own, because the alternative is an operator configuring
-   a model they will never call. The vision model is reached only from the
-   transcription pass, and that pass is reached only by a page nothing else
-   could read. #}
+   a model they will never call. A vision model is reached only from the
+   transcription pass, and that pass is reached only by a page OCR could not
+   read. #}
 <p class="small">
   A vision model is used for one thing: reading a page that could not be read
   any other way &mdash; a scan or a photograph. A PDF whose text extracts
@@ -207,29 +207,29 @@
 <h2>Which model reads images</h2>
 
 <p class="row">
-  <label><input type="radio" name="vision_scope" value="local" id="vision-local"
-                {% if not vision.is_external %}checked{% endif %}>
+  <label><input type="radio" name="vision_mode" value="local" id="vision-local"
+                {% if not cfg.is_vision_external %}checked{% endif %}>
     <strong>The built-in local runner</strong></label>
 </p>
 <p class="small" style="margin: 0 0 12px 22px">
-  Page images are read on this machine and nothing about them leaves it. This is
-  what the pipeline did before this setting existed, and it is the safe answer
-  for case material.
+  Page images are read on this machine and nothing about them leaves it. This
+  is what the pipeline did before this setting existed, and it is the safe
+  answer for case material.
 </p>
 
 <p class="row">
-  <label><input type="radio" name="vision_scope" value="external" id="vision-external"
-                {% if vision.is_external %}checked{% endif %}>
+  <label><input type="radio" name="vision_mode" value="external" id="vision-external"
+                {% if cfg.is_vision_external %}checked{% endif %}>
     <strong>The same external endpoint as the text model</strong></label>
 </p>
 <p class="small" style="margin: 0 0 12px 22px">
   The address, key and dialect saved under Text model above. There is no second
   address here on purpose: one endpoint serving both models is the arrangement
-  this page can describe honestly, and a third address would need its own key
-  and its own dialect before it could mean anything.
+  this page can describe honestly, and a third address would have to carry its
+  own key and its own dialect to mean anything.
 </p>
 
-<p class="warn" id="vision-warning" {% if not vision.is_external %}hidden{% endif %}>
+<p class="warn" id="vision-warning" {% if not cfg.is_vision_external %}hidden{% endif %}>
   <strong>Page images leave this machine while the external endpoint reads
   them.</strong> A page image is the rawest case material there is: the whole
   page as it was scanned or photographed &mdash; letterhead, signatures,
@@ -237,22 +237,16 @@
   have quoted from it. It is sent to whatever endpoint is configured above.
 </p>
 
-{# The name box is usable under either choice, unlike the text model's, because
-   the local runner needs a vision model named too - there is no prepackaged one
-   for this page to fall back on. An empty box is a real answer here and means
-   no page image is read at all. #}
+{# The name box is usable in both modes, unlike the text model's, because the
+   local runner needs a vision model named too - there is no prepackaged one
+   this page could fall back to. #}
 <label class="small" for="vision-model">Vision model name &mdash; the name the chosen endpoint gives it</label>
 <input id="vision-model" type="text" spellcheck="false" autocomplete="off"
        style="width: 100%; max-width: 640px; display: block; margin: 4px 0 4px"
        placeholder="the name that endpoint gives the vision model"
        value="{{ vision.stored_model }}">
 <p class="small" id="vision-model-live">In use: {{ vision.model.value or 'not set' }} &mdash;
-  <span class="tag">{{ vision.model.source }}</span>
-  {% if vision.model.source == 'environment' %}
-  &mdash; from <code>VLM_MODEL</code> in .env, which still works for the local
-  runner; a name typed above replaces it.
-  {% endif %}
-</p>
+  <span class="tag">{{ vision.model.source }}</span></p>
 
 <p class="row">
   <button id="vision-save" class="btn">Save</button>
@@ -260,21 +254,13 @@
   <span id="vision-status" class="small"></span>
 </p>
 <p class="small">
-  The check asks two questions: whether that endpoint serves the model, and
-  whether the model can see. The second can only be asked of an Ollama server,
-  which answers it directly, so a vision model can be confirmed as one and a
-  text-only model can be caught here rather than after it has written a
-  plausible page that never existed.
-  {% if vision.can_be_verified %}
-  The endpoint in force for vision is an Ollama server, so the check can answer
-  the second question.
-  {% else %}
-  The endpoint in force for vision is spoken to in the OpenAI dialect, which
-  offers no way to ask, so the check will say the second question could not be
-  answered &mdash; that is not a yes and is not shown as one.
-  {% endif %}
-  Like the test above, the check measures what is saved and not what is typed,
-  so save before checking a change.
+  The check asks the endpoint what the model can do. An Ollama server answers
+  that question directly, so a vision model can be confirmed as one and a
+  text-only model can be caught here rather than after it has transcribed a page
+  image into confident nonsense. An OpenAI-compatible endpoint offers no way to
+  ask, so the answer there is that it could not be determined &mdash; which is
+  not a yes and is not shown as one. Like the test above, the check measures
+  what is saved and not what is typed, so save before checking a change.
 </p>
 
 <div id="vision-out"></div>
@@ -486,19 +472,9 @@ document.getElementById('save').addEventListener('click', () => {
 });
 
 document.getElementById('clear').addEventListener('click', () => {
-  // The vision settings are not cleared here - they are a separate choice - but
-  // clearing the address out from under a vision model that was set to run on
-  // it leaves transcription with nowhere to go, so the operator is told before
-  // rather than after.
-  const strandsVision = savedVisionScope === 'external';
   if (!confirm('Clear the endpoint, model name, API key and Ollama tick ' +
                'from settings?\n\n' +
-               'The text model returns to the prepackaged local model.' +
-               (strandsVision
-                ? '\n\nImages are set to be read on that same endpoint. ' +
-                  'Clearing it leaves them unreadable until you set Reading ' +
-                  'images back to the local runner.'
-                : ''))) return;
+               'The text model returns to the prepackaged local model.')) return;
   // The dialect is cleared with the address it described. Leaving it ticked
   // would hand the next endpoint typed here a native-API setting chosen for a
   // server that is gone.
@@ -549,33 +525,33 @@ const visionOut = document.getElementById('vision-out');
 const visionExternalRadio = document.getElementById('vision-external');
 const visionWarningEl = document.getElementById('vision-warning');
 
-const savedVisionScope = '{{ vision.scope }}';
+const savedVisionMode = '{{ vision.scope }}';
 // Quoted through tojson rather than pasted between apostrophes. A model name is
 // whatever the operator typed, and a character the template escapes for HTML
 // would arrive here as an entity and never compare equal to what is in the box,
 // leaving the status line permanently claiming an unsaved change.
 const savedVisionModel = {{ vision.stored_model | tojson }};
 
-function chosenVisionScope() {
+function chosenVisionMode() {
   return visionExternalRadio.checked ? 'external' : 'local';
 }
 
 // The typed name counts as an unsaved change here, where it does not in the
 // section above. The check button measures the saved name, so typing one name
-// and then reading a confirmation about another is the mistake this section can
+// and then reading a green line about another is the mistake this section can
 // produce on its own, and this line is what stops it.
-function applyVisionScope() {
-  const external = chosenVisionScope() === 'external';
+function applyVisionMode() {
+  const external = chosenVisionMode() === 'external';
   visionWarningEl.hidden = !external;
-  const changed = chosenVisionScope() !== savedVisionScope
+  const changed = chosenVisionMode() !== savedVisionMode
     || visionModelBox.value.trim() !== savedVisionModel.trim();
   visionStatusEl.textContent = changed ? 'not saved yet — press Save' : '';
 }
 
 for (const id of ['vision-local', 'vision-external']) {
-  document.getElementById(id).addEventListener('change', applyVisionScope);
+  document.getElementById(id).addEventListener('change', applyVisionMode);
 }
-visionModelBox.addEventListener('input', applyVisionScope);
+visionModelBox.addEventListener('input', applyVisionMode);
 
 function visionResult(text, kind) {
   visionOut.innerHTML = '';
@@ -586,14 +562,14 @@ function visionResult(text, kind) {
 }
 
 document.getElementById('vision-save').addEventListener('click', () => {
-  const scope = chosenVisionScope();
+  const mode = chosenVisionMode();
   const name = visionModelBox.value.trim();
   // Only the two vision fields are posted. The text endpoint, its key and its
   // dialect are not this button's business, and the route leaves alone what it
   // was not sent.
-  save({ vision_scope: scope, vision_model: name },
+  save({ vision_mode: mode, vision_model: name },
        name
-         ? (scope === 'external'
+         ? (mode === 'external'
             ? `saved — ${name} reads images on the external endpoint`
             : `saved — ${name} reads images on the local runner`)
          : 'saved — no vision model is set, so nothing will read images',
@@ -606,15 +582,15 @@ document.getElementById('vision-check').addEventListener('click', async () => {
   visionResult('checking…');
   try {
     const data = await post('/api/settings/vision/test', {});
-    // Three outcomes, never two. true and false are answers from the endpoint;
-    // null means the endpoint could not be asked, which is neither, and it is
-    // drawn without the ok class because the message itself says nothing was
-    // confirmed. A "could not be determined" shown in green would be read as a
-    // yes, and the failure being guarded against here is a text-only model
-    // transcribing a page image into confident nonsense that becomes evidence.
-    if (data.vision === true) {
+    // Three outcomes, never two. An endpoint that cannot be asked what a model
+    // can do is rendered without the ok class and says in words that nothing
+    // was confirmed, because the failure being guarded against here is a
+    // text-only model transcribing a page image into confident nonsense that
+    // then becomes evidence. A "could not be determined" shown in green would
+    // be read as a yes.
+    if (data.vision === 'yes') {
       visionResult(data.message, 'ok');
-    } else if (data.vision === false) {
+    } else if (data.vision === 'no') {
       visionResult(data.message, 'bad');
     } else {
       visionResult(data.message, data.ok ? '' : 'bad');
@@ -627,11 +603,11 @@ document.getElementById('vision-check').addEventListener('click', async () => {
 });
 
 applyMode();
-applyVisionScope();
+applyVisionMode();
 
-// After both, never before: each of them writes its own status line, and
-// restoring the notes first left them overwritten with an empty string on every
-// reload after a save - the one moment those lines have something to say.
+// After applyMode(), never before: applyMode() writes the status line itself,
+// and restoring the note first left it overwritten with an empty string on
+// every reload after a save - the one moment this line has something to say.
 const note = sessionStorage.getItem('settings-note');
 if (note) {
   sessionStorage.removeItem('settings-note');
@@ -643,54 +619,148 @@ if (visionNote) {
   visionStatusEl.textContent = visionNote;
 }
 
+// The route, the field names and the phrase are named once, here, because the
+// page has to ask for exactly what the endpoint checks. If the phrase the page
+// asks for and the phrase the endpoint requires ever drift apart, the request
+// is refused on arrival and the server's own message is printed below - which
+// is the failure worth having, rather than a page that accepts a phrase the
+// server does not and looks like it worked.
 const PURGE_PATH = '/api/purge';
+// The phrases live on the server and differ per scope. Fetching them keeps
+// one definition: a page carrying its own copy unlocked the button on a word
 // the purge then refused.
 let PURGE_PHRASES = {};
 function purgePhrase() {
   const el = document.querySelector('input[name="purge-scope"]:checked');
   return PURGE_PHRASES[el ? el.value : 'documents'] || '';
+}
 fetch(PURGE_PATH).then(r => r.json()).then(d => {
   PURGE_PHRASES = d.phrases || {};
   const shown = document.getElementById('purge-phrase');
   if (shown) shown.textContent = purgePhrase();
   const box = document.getElementById('purge-confirm');
   if (box) box.placeholder = purgePhrase();
+}).catch(() => {});
+
 const purgeBtn = document.getElementById('purge');
 const purgeBox = document.getElementById('purge-confirm');
 const purgeStatus = document.getElementById('purge-status');
 const purgeOut = document.getElementById('purge-out');
+
 const PURGE_LABEL = {
+  documents: 'every document, including the original uploaded files',
+  reports: 'every saved report',
+  all: 'every document, every original uploaded file, and every saved report',
+};
+
 function purgeScope() {
   return document.querySelector('input[name="purge-scope"]:checked').value;
+}
+
+// The button stays inert until the phrase matches exactly. Whitespace around it
+// is trimmed because a paste carries it; nothing else is forgiven, so a
+// near-miss stays locked rather than passing as close enough.
 function armPurge() {
   purgeBtn.disabled = !purgePhrase() || purgeBox.value.trim() !== purgePhrase();
+}
+
 function purgeList(entries) {
+  const ul = document.createElement('ul');
+  ul.className = 'small';
+  ul.style.margin = '4px 0 10px';
+  for (const [label, value] of entries) {
+    const li = document.createElement('li');
+    li.textContent = value === undefined
+      ? label
+      : `${label}: ${value === null || value === '' ? 'none' : value}`;
+    ul.appendChild(li);
+  }
+  return ul;
+}
+
+// What the endpoint reports is printed as it comes back rather than against a
+// fixed list of tables this page believes exist. A count the endpoint starts
+// reporting appears here without this page being changed, and - the reason that
+// matters more - a count it stops reporting cannot be invented here.
 function purgeReport(data) {
   purgeOut.replaceChildren();
+  const head = document.createElement('p');
+  head.className = 'notice ok';
+  head.textContent = 'Destroyed. None of it can be recovered.';
   purgeOut.appendChild(head);
+
+  const flat = [];
+  const groups = [];
+  for (const [key, value] of Object.entries(data || {})) {
+    if (key === 'scope') continue;
+    if (Array.isArray(value)) groups.push([key, value.map(v => [String(v), undefined])]);
+    else if (value && typeof value === 'object') groups.push([key, Object.entries(value)]);
+    else flat.push([key, value]);
+  }
   if (flat.length) purgeOut.appendChild(purgeList(flat));
+  for (const [key, entries] of groups) {
+    const heading = document.createElement('h3');
+    heading.textContent = key;
     purgeOut.appendChild(heading);
     purgeOut.appendChild(entries.length
       ? purgeList(entries)
+      : Object.assign(document.createElement('p'),
+                      { className: 'small', textContent: 'none' }));
+  }
+  if (!flat.length && !groups.length) {
+    const p = document.createElement('p');
+    p.className = 'small';
+    p.textContent = 'The endpoint returned no counts, so what it destroyed ' +
+                    'cannot be shown here.';
     purgeOut.appendChild(p);
+  }
+}
+
 purgeBox.addEventListener('input', armPurge);
+
 purgeBtn.addEventListener('click', async () => {
+  // Checked again on the way out as well as on every keystroke: the button can
+  // be reached by keyboard, and this is the one action on the page that must
+  // never run from a state the operator has since typed their way out of.
   if (purgeBox.value.trim() !== purgePhrase()) return;
   const scope = purgeScope();
   if (!confirm(`Destroy ${PURGE_LABEL[scope]}?\n\n` +
+               'This cannot be undone. The original uploaded files go too, so ' +
+               'anything that has not already been downloaded is gone.')) return;
+
   purgeBtn.disabled = true;
   purgeStatus.textContent = 'destroying…';
   purgeOut.replaceChildren();
+  try {
     const res = await fetch(PURGE_PATH, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ scope: scope, confirm: purgePhrase() }),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) throw new Error((data && data.detail) || `HTTP ${res.status}`);
     purgeReport(data);
+  } catch (err) {
+    // The failure is not reported as "nothing was destroyed", because a request
+    // that fails on the way back may already have destroyed what it was asked
+    // to. The operator is told to read the list rather than told a state of the
+    // world this page cannot know.
     purgeOut.replaceChildren();
+    const p = document.createElement('p');
+    p.className = 'notice bad';
     p.textContent = 'The purge did not report a result: ' + err.message +
+                    ' — check the document list above before running it again, ' +
+                    'because part of it may already have been destroyed.';
     purgeOut.appendChild(p);
+  } finally {
     purgeStatus.textContent = '';
+    // The phrase is cleared whatever happened, so the control is never left
     // armed behind a finished purge and a second one has to be typed for.
     purgeBox.value = '';
     armPurge();
+    refresh();
+  }
+});
+
 armPurge();
 </script>
 {% endblock %}
