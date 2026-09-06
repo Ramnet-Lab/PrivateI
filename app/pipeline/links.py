@@ -73,6 +73,13 @@ NONE = ""       # the relation of a pair that was judged and found unrelated
 # window judged and never look at them again.
 TERMINATOR = "END OF ANSWERS"
 
+# How many times a window that did not finish is halved before its pairs are
+# asked one batch at a time. A window is truncated when the answer runs past the
+# reply cap, which happens exactly when it found a lot - so the fix is to ask
+# about fewer things, not to give up on them. Halving both sides quarters the
+# pairs, so two splits take a 625-pair window to 39.
+MAX_SPLITS = env_int("LINK_MAX_SPLITS", 2)
+
 
 class Pairing:
     """One category pairing, its relations, and how to ask about them."""
@@ -414,7 +421,12 @@ SYSTEM = (
     "cost to giving it; a connection asserted between two unrelated items is "
     "worse than a connection missed, because it will be read as a finding.\n"
     "Never infer a connection from the fact that two items appear in the same "
-    "investigation. Everything here appears in the same investigation."
+    "investigation. Everything here appears in the same investigation.\n"
+    "Watch who is speaking and who is spoken about. Two statements involving "
+    "the same person are not connected by that alone, and a statement someone "
+    "made about a person is not in conflict with a statement that person made "
+    "about someone else. A contradiction requires the same question answered "
+    "two incompatible ways, not merely two different things said nearby."
 )
 
 TEMPLATE = """{question}
@@ -592,6 +604,9 @@ For each connected pair write one line:
 - <confidence> is a number between 0 and 1.
 - <basis> is one short sentence saying what in the two items themselves shows
   the connection. If you cannot write that sentence, do not report the pair.
+  Write it for someone who cannot see this list: quote or describe the wording,
+  never write "A3" or "B7" in it. A basis that names a label says nothing to
+  the person who reads it later.
 
 Report nothing for pairs that are not connected. When you have written every
 connected pair - and if there are none, immediately - write this on its own
@@ -682,6 +697,76 @@ def judge_window(client, model: str, pairing: Pairing, left: list[dict],
                              think=thinking_enabled())
     return parse_group((answer.get("response") or ""), pairing, left,
                        right if not same_block else left)
+
+
+def _halves(items: list[dict]) -> tuple[list[dict], list[dict]]:
+    mid = max(1, len(items) // 2)
+    return items[:mid], items[mid:]
+
+
+def resolve_window(client, model: str, pairing: Pairing, left: list[dict],
+                   right: list[dict], same: bool, options: dict,
+                   depth: int = 0) -> tuple[list[dict], list[tuple[dict, dict]]]:
+    """Judge every pair in a window, splitting it until the model finishes.
+
+    A window is truncated when its answer runs past the reply cap, which happens
+    precisely when it has a lot to report - so an unfinished window is a signal
+    that there is something there, and the worst possible response is to leave
+    it. Halving both sides quarters the pairs and asks again; past MAX_SPLITS
+    the remaining pairs go to the one-pair-at-a-time judge, which cannot be
+    truncated into silence because it has its own per-pair fallback.
+
+    Returns the connections found and the pairs actually judged. Anything not in
+    the second list has no row written for it and will be picked up by a later
+    run - which is the whole reason the two are returned separately.
+    """
+    pairs = window_pairs(left, right, same)
+    if not pairs:
+        return [], []
+    try:
+        verdicts, complete = judge_window(client, model, pairing, left, right,
+                                          options)
+    except Exception:
+        if depth == 0:
+            raise               # let the caller report a window that failed outright
+        verdicts, complete = [], False
+    if complete:
+        return verdicts, pairs
+
+    if depth >= MAX_SPLITS or len(pairs) <= BATCH_PAIRS:
+        log.warning("%s: falling back to pair-by-pair for %d pair(s)",
+                    pairing.name, len(pairs))
+        found: list[dict] = []
+        judged: list[tuple[dict, dict]] = []
+        for start in range(0, len(pairs), BATCH_PAIRS):
+            batch = pairs[start:start + BATCH_PAIRS]
+            try:
+                answers = judge(client, model, pairing, batch, options)
+            except Exception as exc:
+                log.error("%s: fallback batch failed: %s", pairing.name, exc)
+                continue
+            for verdict in answers:
+                judged.append((verdict["a"], verdict["b"]))
+                if verdict.get("relation"):
+                    found.append(verdict)
+        return found, judged
+
+    log.info("%s: window of %d pair(s) did not finish; splitting it",
+             pairing.name, len(pairs))
+    found, judged = [], []
+    if left is right:
+        a, b = _halves(left)
+        parts = [(a, a, True), (a, b, True), (b, b, True)] if b else [(a, a, True)]
+    else:
+        la, lb = _halves(left)
+        ra, rb = _halves(right)
+        parts = [(x, y, same) for x in (la, lb) if x for y in (ra, rb) if y]
+    for x, y, sm in parts:
+        sub_found, sub_judged = resolve_window(
+            client, model, pairing, x, y, sm, options, depth + 1)
+        found.extend(sub_found)
+        judged.extend(sub_judged)
+    return found, judged
 
 
 # -- storing -----------------------------------------------------------------------
@@ -819,6 +904,23 @@ def run(mode: str = "grouped", wanted: list[str] | None = None,
                         "Choose one on the settings page.")
         return
 
+    # A pass reads the entity set once and compares it for however long it
+    # takes. A document finishing during that changes the entities underneath
+    # it - extraction merges names as it goes - so the pairs it judged in the
+    # first hour can be pairs of things that no longer exist by the third. The
+    # first full run of this hit exactly that: a re-ingest halfway through moved
+    # two people's ids and deleted the rows written before it.
+    moving = state.query(
+        "SELECT filename FROM documents WHERE status IN ('queued','processing')")
+    if moving:
+        names = ", ".join(r["filename"] for r in moving[:5])
+        yield "error", (
+            f"{len(moving)} document(s) are still being processed ({names}). "
+            f"Comparing entities while the corpus is still changing judges "
+            f"pairs that may not exist by the time the pass finishes. Let the "
+            f"queue empty and run it again.")
+        return
+
     by_type = corpus_entities()
     usable, skipped = _usable(by_type, keep_fragments)
     if not any(usable.values()):
@@ -839,8 +941,11 @@ def run(mode: str = "grouped", wanted: list[str] | None = None,
         yield "error", str(exc).splitlines()[0]
         return
 
+    # A window answer is one line per connection found, so the cap has to fit the
+    # windows that find many - and those are the interesting ones. At 1200 the
+    # first full run truncated eleven windows, deferring 6,534 pairs.
     options = default_options("TEXT_TEMPERATURE", "TEXT_NUM_CTX",
-                              "LINK_NUM_PREDICT", 1200, seed=random_seed())
+                              "LINK_NUM_PREDICT", 3000, seed=random_seed())
     names = wanted or sorted(PAIRINGS)
     done = judged_pairs()
     linked = judged = 0
@@ -877,32 +982,36 @@ def run(mode: str = "grouped", wanted: list[str] | None = None,
                 yield "status", (f"{name}: window {index} of {len(plan)} "
                                  f"({len(covered)} pair(s))")
                 try:
-                    verdicts, complete = judge_window(
-                        client, model, pairing, left, right, options)
+                    verdicts, settled = resolve_window(
+                        client, model, pairing, left, right, same, options)
                 except Exception as exc:
                     log.error("%s: window %d failed: %s", name, index, exc)
                     yield "error", f"{name}: window {index} failed — {exc}"
                     continue
-                if not complete:
-                    # The model never said it had finished, so this window's
-                    # silence about a pair means nothing. Recording the pairs as
-                    # judged would bury hundreds at a time.
-                    log.warning("%s: window %d gave no completion marker; its "
-                                "%d pair(s) are left for a later run",
-                                name, index, len(covered))
-                    yield "error", (f"{name}: window {index} did not finish; "
-                                    f"its {len(covered)} pair(s) were not judged")
-                    continue
+                # Only the pairs the model actually got through are written.
+                # A pair with no row is a pair a later run will pick up, which
+                # is what keeps a truncated answer from burying hundreds of
+                # pairs as "looked at, nothing there".
                 named = {tuple(sorted((v["a"]["id"], v["b"]["id"]))): v
                          for v in verdicts}
+                done_here = {tuple(sorted((a["id"], b["id"])))
+                             for a, b in settled}
                 for a, b in covered:
                     key = tuple(sorted((a["id"], b["id"])))
+                    if key not in done_here:
+                        continue
                     verdict = named.get(key) or {"a": a, "b": b,
                                                  "relation": NONE}
                     judged += 1
                     if record(verdict, pairing, model, run_id):
                         linked += 1
                         yield "token", show(verdict)
+                left_over = len(covered) - len(
+                    [1 for a, b in covered
+                     if tuple(sorted((a["id"], b["id"]))) in done_here])
+                if left_over:
+                    yield "error", (f"{name}: window {index} left {left_over} "
+                                    f"pair(s) unjudged for a later run")
             continue
 
         for start in range(0, len(pairs), BATCH_PAIRS):

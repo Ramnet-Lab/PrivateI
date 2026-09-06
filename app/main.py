@@ -445,6 +445,28 @@ def api_report_cancel(run_id: str):
 MODES = ("grouped", "connected", "exhaustive")
 
 
+def _stand_down_link_pass() -> None:
+    """Stop any link pass, then throw the inference set away.
+
+    Both halves matter and the order does. A pass reads the entity set once and
+    then compares it for however long it takes, so a corpus change during one
+    leaves it judging pairs of things that no longer exist - and because the
+    change also clears the table, the rows it goes on writing are the only ones
+    that survive, which is the worst of both. It is stopped first so it is not
+    still writing into what the next line deletes.
+
+    Clearing before the graph work, not after: an inferred edge is still an
+    edge, so one left in place would hold an entity whose evidence has just gone
+    out of the orphan sweep that follows.
+    """
+    run = report_run.active()
+    if run is not None and run.kind == "link pass":
+        log.info("stopping link pass %s: the corpus it was drawn over is "
+                 "changing", run.run_id)
+        report_run.cancel(run.run_id)
+    links.clear()
+
+
 @app.get("/links", response_class=HTMLResponse)
 def links_page(request: Request):
     return templates.TemplateResponse(request, "links.html", {
@@ -731,6 +753,11 @@ async def upload(files: list[UploadFile]):
         accepted.append({"doc_id": doc_id, "filename": name})
         log.info("accepted %s as %s (%d bytes)", name, doc_id, size)
 
+    if accepted:
+        # New evidence is on its way, and when it lands extraction will merge
+        # names and add entities. Inferences drawn before that were drawn over a
+        # different corpus, and a pass still running is comparing one.
+        _stand_down_link_pass()
     return JSONResponse({"accepted": accepted, "skipped": skipped,
                          "queued": runner.queue_depth()})
 
@@ -741,11 +768,7 @@ def delete_document(doc_id: str):
     if not doc:
         raise HTTPException(status_code=404, detail="document not found")
 
-    # Before the graph work, not after. Entity links are inference drawn over the
-    # corpus as it was, so a document leaving makes all of them suspect - and an
-    # inferred edge is still an edge, so one left in place would hold a dead
-    # entity out of the orphan sweep below.
-    links.clear()
+    _stand_down_link_pass()
 
     if graph.available():
         with graph.driver().session() as session:
@@ -780,11 +803,7 @@ def _reset_document(doc_id: str) -> None:
     what makes a prompt change or an OCR fix actually reach existing documents
     instead of only new ones. The uploaded file itself is never touched.
     """
-    # Before the graph work, not after. Entity links are inference drawn over the
-    # corpus as it was, so a document leaving makes all of them suspect - and an
-    # inferred edge is still an edge, so one left in place would hold a dead
-    # entity out of the orphan sweep below.
-    links.clear()
+    _stand_down_link_pass()
 
     if graph.available():
         with graph.driver().session() as session:
@@ -852,7 +871,7 @@ def reingest_all():
             conn.execute("DELETE FROM entities")
         # Entity ids are rebuilt from scratch here, so every stored pair key
         # refers to something that no longer exists under that name.
-        links.clear()
+        _stand_down_link_pass()
         for row in docs:
             runner.enqueue(row["doc_id"], force=True)
     log.info("re-ingesting all %d document(s)%s", len(docs),
@@ -1041,12 +1060,14 @@ def api_purge(payload: dict):
     # rather than cancelled, for the reason given further down: a purge that
     # abandons work tells the operator material was destroyed when some of it
     # was not.
-    if report_run.active() is not None and (wants_documents or wants_reports):
+    busy = report_run.active()
+    if busy is not None and (wants_documents or wants_reports):
+        where = "report page" if busy.kind == "report" else "links page"
         raise HTTPException(
             status_code=409,
-            detail="a report is being written from these records and would "
-                   "outlive what this deletes; stop it on the report page, or "
-                   "wait for it to finish, and try again")
+            detail=f"a {busy.kind} is running against these records and would "
+                   f"outlive what this deletes; stop it on the {where}, or "
+                   f"wait for it to finish, and try again")
 
     # The same wedge the re-ingest routes were built around. The worker is one
     # thread that spends most of its life blocked inside a model call, and it

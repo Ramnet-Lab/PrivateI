@@ -270,7 +270,16 @@ def load_links(rows: list[dict]) -> int:
                 basis=row.get("basis"), pairing=row.get("pairing"),
                 model=row.get("model"), now=utcnow())
             drawn += result.consume().counters.relationships_created
-    log.info("drew %d inferred edge(s) into the graph", drawn)
+    # A link naming an entity the graph does not have draws nothing, and the
+    # MATCH makes that silent. It means the entity was merged or deleted after
+    # the link was recorded, which is worth one line rather than a discrepancy
+    # between two counts that nobody can account for later.
+    if drawn < len(rows):
+        log.warning("%d of %d recorded link(s) name an entity that is no longer "
+                    "in the graph and were not drawn", len(rows) - drawn,
+                    len(rows))
+    else:
+        log.info("drew %d inferred edge(s) into the graph", drawn)
     return drawn
 
 
