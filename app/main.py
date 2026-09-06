@@ -114,7 +114,7 @@ def graph_page(request: Request):
 
 @app.get("/timeline", response_class=HTMLResponse)
 def timeline_page(request: Request):
-    rows = graph.timeline() if graph.available() else []
+    rows = graph.merged_timeline() if graph.available() else []
     return templates.TemplateResponse(request, "timeline.html", {
         "rows": rows, "c": _counts(),
     })
@@ -569,6 +569,12 @@ def api_links_clear(payload: dict | None = None):
             detail="a link pass is running; stop it before discarding what it "
                    "has written")
     return JSONResponse({"discarded": links.clear()})
+
+
+@app.post("/api/links/tidy")
+def api_links_tidy():
+    """Resolve window labels in bases written before the parser did it."""
+    return JSONResponse({"fixed": links.tidy_bases()})
 
 
 @app.get("/api/links/found")

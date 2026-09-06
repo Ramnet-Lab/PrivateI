@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import re
 
-from . import paths, state
+from . import entities, paths, state
 from .entities import RANKS, normalize
 from .extract import allegation_spans
 from .log import get_logger
@@ -269,6 +269,102 @@ def blocking_faults(docs: list[dict]) -> list[dict]:
                           f"holds {present} now - {recorded - present} were "
                           f"lost after processing"})
     return faults
+
+
+# Capitalised words that are not names. A roster entry made only of these -
+# "the IO" - can neither confirm nor deny that an objective is about this case.
+_NOT_A_NAME = {"the", "and", "for", "who", "was", "his", "her", "him", "she",
+               "they", "them", "that", "this", "with", "from", "she", "you"}
+
+
+def objective_match(goal: str, allegations: list[str]) -> dict:
+    """Whether the objective and the corpus are about the same investigation.
+
+    An objective outlives the documents it was written for. It is kept in the
+    settings table on purpose so it survives a restart, and nothing has ever
+    checked that the corpus underneath it is still the one it was written
+    against - so a purge followed by a different upload leaves an objective
+    about one case pointed at the records of another. That produces a report
+    which weighs elements against documents that never mention the subject, and
+    says so only in passing, twenty pages in.
+
+    Asked in this direction on purpose: "does this objective name anybody these
+    documents know" needs no parsing at all, while pulling a subject out of free
+    prose is guesswork that fails quietly. A name the roster holds and the
+    objective repeats is a match; nothing in common is a mismatch that no amount
+    of model time can repair.
+
+    Cohesion is a second, independent question and does not involve the
+    objective. A document from another case brings its own people and shares
+    none with anyone else, which is what makes it visible without knowing what
+    the case is about. A document merely not naming the subject is not evidence
+    of anything - a records custodian's interview often never does.
+    """
+    text = entities.normalize(" ".join([goal or ""] + list(allegations or [])))
+    roster = [dict(r) for r in state.query(
+        "SELECT entity_id, canonical_name FROM entities "
+        "WHERE entity_type='PERSON' AND merged_into IS NULL")]
+
+    named, others = [], []
+    for row in roster:
+        name = row["canonical_name"]
+        # Match on name tokens rather than the whole rendered string: an
+        # objective writes "MSgt Owen T. Brandt" while a transcript holds
+        # "Brandt", and a whole-string test would call those different people.
+        # Stopwords are excluded because they are not names and they match
+        # everything - "the IO" was being read as a person the objective named,
+        # on the strength of the word "the", which is how a total mismatch came
+        # back as a match.
+        tokens = [t for t in entities.normalize(name).split()
+                  if len(t) >= 3 and t not in _NOT_A_NAME]
+        if not tokens:
+            continue          # a role, not a person; it can settle nothing
+        if any(re.search(rf"\b{re.escape(t)}\b", text) for t in tokens):
+            named.append(name)
+        else:
+            others.append(name)
+
+    # Who appears in each document, for the cohesion check.
+    per_doc: dict[str, set[str]] = {}
+    for row in state.query(
+            "SELECT doc_id, subject_type t, subject_name n FROM triples "
+            "UNION SELECT doc_id, object_type, object_name FROM triples"):
+        if row["t"] != "PERSON":
+            continue
+        eid = entities.resolve_canonical(
+            entities.entity_id("PERSON", row["n"]))
+        per_doc.setdefault(row["doc_id"], set()).add(eid)
+
+    # Documents joined where they share a person, then the groups counted. A
+    # case is one group; a contaminating case is a second one, and it brings its
+    # own witnesses - which is what makes it visible.
+    #
+    # A single document sharing nobody is NOT that, and refusing on it would
+    # block real work: a records custodian's interview often names only the
+    # custodian. Case one's network administrator is exactly that document, and
+    # an earlier version of this check refused the whole corpus over her.
+    groups: list[set[str]] = []
+    for doc_id, people in per_doc.items():
+        joined = [g for g in groups
+                  if any(per_doc[d] & people for d in g)]
+        merged = {doc_id}
+        for g in joined:
+            merged |= g
+            groups.remove(g)
+        groups.append(merged)
+    groups.sort(key=len, reverse=True)
+    # Everything outside the largest group, but only when that outside is itself
+    # a group rather than a stray.
+    foreign: list[str] = []
+    for g in groups[1:]:
+        if len(g) >= 2:
+            foreign.extend(sorted(g))
+    isolated = sorted(d for g in groups[1:] if len(g) == 1 for d in g)
+
+    return {"named": sorted(named), "others": sorted(others),
+            "documents": len(per_doc), "foreign": sorted(foreign),
+            "isolated": isolated, "groups": [sorted(g) for g in groups],
+            "matched": bool(named)}
 
 
 def contributing(contexts: list[dict]) -> set[str]:

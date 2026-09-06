@@ -67,6 +67,26 @@ WINDOW = env_int("LINK_WINDOW", 25)
 
 NONE = ""       # the relation of a pair that was judged and found unrelated
 
+# What a connection is worth to somebody weighing an allegation, which is not
+# the same as how sure the model is of it. "The high bay claim PLACES AT the high
+# bay" is certain and says nothing; a contradiction between two witnesses is less
+# certain and is the entire reason for looking. Ranked by confidence alone the
+# tautologies win every time, because they are the easy ones - which is how the
+# first report to be shown these was shown thirty restatements and nothing it
+# could use. Lower number is shown first.
+RELATION_WORTH = {
+    "contradicts": 0,
+    "corroborates": 1,
+    "elaborates": 2,
+    "same occurrence": 3, "same person": 3, "same document": 3,
+    "same place": 3, "same organisation": 3,
+    "caused": 4, "preceded": 4, "supersedes": 4, "adverse to": 4,
+    "reports to": 5, "restates": 5,
+}
+# Everything not named above - "is about", "concerns", "recorded in", "mentions"
+# - restates structure the graph already carries and goes last.
+STRUCTURAL = 9
+
 # The model writes this on its own line when it has finished a window. Without
 # it an empty reply and a reply meaning "none of these connect" are the same
 # string, and treating a failure as "none connect" would mark every pair in the
@@ -623,6 +643,28 @@ SET B
 {set_b}
 """
 
+# A basis that says "A7 states, while B4 describes" is unreadable to anyone who
+# cannot see the window those labels belonged to - which is everyone, later.
+# Telling the model not to write them removed most of it and not all, so the
+# labels are resolved here instead, where which item each one named is known
+# for certain rather than asked for politely.
+_LABEL = re.compile(r"\b([AB])\s*(\d+)\b")
+
+
+def _readable(basis: str, a_label: str, b_label: str) -> str:
+    def swap(match: re.Match) -> str:
+        label = f"{match.group(1).upper()}{match.group(2)}"
+        if label == a_label:
+            return "the first"
+        if label == b_label:
+            return "the second"
+        # A label for some other item in the same window. It named something
+        # real, but nothing this pair's reader will ever see.
+        return "another item"
+    text = _LABEL.sub(swap, basis)
+    return text[0].upper() + text[1:] if text else text
+
+
 _GROUP_ANSWER = re.compile(
     r"^\s*([AB])\s*(\d+)\s*[|,]\s*([AB])\s*(\d+)\s*\|(.*)$", re.IGNORECASE)
 
@@ -668,6 +710,7 @@ def parse_group(raw: str, pairing: Pairing, left: list[dict],
         except (ValueError, IndexError):
             confidence = 0.0
         basis = fields[3].strip() if len(fields) > 3 else ""
+        basis = _readable(basis, f"{a_side}{int(a_num)}", f"{b_side}{int(b_num)}")
         seen.add(key)
         out.append({"a": a, "b": b, "relation": known[relation],
                     "subject": subject if subject in ("A", "B") else "",
@@ -831,6 +874,62 @@ def found(pairing: str | None = None, limit: int = 500) -> list[dict]:
     return rows
 
 
+def for_pages(pages: set[tuple[str, int]], limit: int = 30) -> list[dict]:
+    """Recorded links with at least one end on one of these pages.
+
+    Report generation retrieves passages per allegation and then reasons over
+    them. A link is worth putting in front of that reasoning when one of its
+    ends is already in it - which is exactly the case where the other end is
+    something the allegation would not otherwise have seen. A link with both
+    ends outside the retrieved material is about some other part of the case.
+
+    Selected on page provenance rather than on entity ids because the facts the
+    report assembles carry names and citations, not ids, and threading ids
+    through the chat path to get them here would change three modules to answer
+    a question the pages already answer.
+    """
+    if not pages:
+        return []
+    where = corpus_entities()
+    on_page = {e["id"] for group in where.values() for e in group
+               if e["pages"] & pages}
+    if not on_page:
+        return []
+    rows = [dict(r) for r in state.query(
+        "SELECT * FROM entity_links WHERE relation <> ''")]
+    keep = [r for r in rows
+            if r["a_id"] in on_page or r["b_id"] in on_page]
+    # Worth first, confidence second. A limit applied to a list ordered by
+    # confidence alone throws away every contradiction to make room for
+    # restatements of what the reader can already see.
+    keep.sort(key=lambda r: (RELATION_WORTH.get(r["relation"], STRUCTURAL),
+                             -float(r.get("confidence") or 0)))
+    # Taken in rotation across the worth bands rather than straight off the top.
+    # A strict sort hands the whole budget to whichever band comes first: ranked
+    # by confidence that was thirty restatements, and ranked by worth it was
+    # thirty contradictions - a block made entirely of the relation whose
+    # precision is worst, with the corroboration that would settle them left
+    # out. Rotation keeps the order (a contradiction is still shown before a
+    # restatement) while making sure every band that has something is heard.
+    bands: dict[int, list[dict]] = {}
+    for row in keep:
+        bands.setdefault(RELATION_WORTH.get(row["relation"], STRUCTURAL),
+                         []).append(row)
+    ordered: list[dict] = []
+    while len(ordered) < limit and any(bands.values()):
+        for worth in sorted(bands):
+            if bands[worth]:
+                ordered.append(bands[worth].pop(0))
+                if len(ordered) >= limit:
+                    break
+    out = []
+    for row in ordered[:limit]:
+        row["a_name"] = entities.display_name(row["a_id"])
+        row["b_name"] = entities.display_name(row["b_id"])
+        out.append(row)
+    return out
+
+
 def summary() -> dict:
     """Counts for the stat line: how many judged, how many were links."""
     row = state.query_one(
@@ -859,6 +958,34 @@ def draw() -> int:
     rows = [dict(r) for r in state.query(
         "SELECT * FROM entity_links WHERE relation <> ''")]
     return graph.load_links(rows)
+
+
+def tidy_bases() -> int:
+    """Resolve window labels in bases already stored.
+
+    The same substitution the parser now applies, for rows written before it
+    did. Which item a label named is no longer known here, so the pair's own
+    two ends are the only safe reading - which is what the labels almost always
+    are, since a basis explains the pair it belongs to.
+    """
+    rows = state.query(
+        "SELECT a_id, b_id, basis FROM entity_links WHERE relation <> ''")
+    fixed = 0
+    with state.tx() as conn:
+        for row in rows:
+            basis = row["basis"] or ""
+            if not _LABEL.search(basis):
+                continue
+            cleaned = _LABEL.sub(
+                lambda m: "the first" if m.group(1).upper() == "A" else "the second",
+                basis)
+            cleaned = cleaned[0].upper() + cleaned[1:] if cleaned else cleaned
+            conn.execute("UPDATE entity_links SET basis=? WHERE a_id=? AND b_id=?",
+                         (cleaned, row["a_id"], row["b_id"]))
+            fixed += 1
+    if fixed:
+        log.info("resolved window labels in %d stored basis line(s)", fixed)
+    return fixed
 
 
 def clear() -> int:

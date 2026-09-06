@@ -1,6 +1,6 @@
 """Extraction prompt contract.  Versioned like the transcription prompt."""
 
-PROMPT_VERSION = "extract/v11"
+PROMPT_VERSION = "extract/v12"
 
 ENTITY_TYPES = ["PERSON", "ORG", "LOCATION", "EVENT", "DOCUMENT", "CLAIM"]
 
@@ -28,7 +28,7 @@ Rules:
 - STATED NICKNAMES ARE FACTS. When the text says a person is called something else - "<rank> <surname>, who everyone calls <nickname>", "goes by <nickname>", "we called him <nickname>" - emit an assertion with predicate "is also known as": subject the full name, object_type PERSON, object the nickname. A nickname cannot be inferred from spelling, so the only way it is ever known is that a document said it.
 - A JOB TITLE IS NOT A PERSON. "Civilian Network Administrator", "the section chief", "Equipment Test Craftsman", "the flight chief" are roles. If the text names the person holding the role, use the name; if it does not, skip the assertion rather than making the title into a person. Roles may be used as the OBJECT of a role assertion ("PERSON: <the named person>" / "holds the position of" / "CLAIM: <the title>").
 - NEVER invent a name. Every subject_name and object_name must appear verbatim somewhere in this page or in the document header below. If you cannot name a person from the text, skip the assertion entirely.
-- Pronoun resolution in interview transcripts: "I", "me", "my" refer to the interviewee named in the document header. "You" inside an interviewer's question also refers to that interviewee. Resolve them to that person's name; never emit "I", "you", "the interviewee", or "unknown" as an entity name, and never substitute some other person's name.
+- Pronoun resolution in interview transcripts: "I", "me", "my" refer to the interviewee named in the document header - EXCEPT inside speech attributed to somebody else. In "Morgan said you will regret questioning me", the "me" is Morgan, not the interviewee whose transcript it appears in, and the "you" is whoever Morgan was addressing. Resolving reported speech to the interviewee invents a remark about a person who was only listening. "You" inside an interviewer's question also refers to that interviewee. Resolve them to that person's name; never emit "I", "you", "the interviewee", or "unknown" as an entity name, and never substitute some other person's name.
 - A CLAIM's text is written in the third person. Replace "I", "me", "my", "myself" inside the claim with the name of the person the claim is attributed to - the subject of your own assertion - and "you" in an interviewer's question with the interviewee's name. Leave "we" and "us" as written; a group cannot be resolved to one person. A first-person word left standing inside a claim is read later as a second person present at the event, which turns two accounts that agree into a contradiction.
 - event_date_basis: how the date is known - "stated" (the text gives the exact day), "month" (only a month is given: emit "YYYY-MM", basis "month"), "approx" ("around mid May": leave event_date null OR give the month with basis "approx"), "inferred" (you resolved a relative expression from an explicit anchor). Omit or null when event_date is null.
 - event_date: WHEN THE EVENT ITSELF HAPPENED, not when it was written down, reported, or investigated. This distinction matters more than any other field here.

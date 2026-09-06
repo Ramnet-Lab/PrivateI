@@ -15,7 +15,7 @@ from rapidfuzz import fuzz
 
 from . import llm_settings, paths, state
 from .config import env_int
-from .entities import entity_id, normalize
+from .entities import RANKS, entity_id, normalize
 from .log import get_logger, utcnow
 from .model_client import Ollama, default_options, thinking_enabled
 from .prompts_extract import ENTITY_TYPES, build as build_prompt
@@ -907,8 +907,53 @@ def _sub_first_person(text: str, rewrite) -> str:
     return "".join(out)
 
 
+# Speech attributed to somebody inside a quote. The whole point is the name
+# BEFORE the first person token: "Morgan said you will regret questioning me"
+# puts "me" in Morgan's mouth, not the interviewee's, however plainly the
+# sentence sits in the interviewee's transcript.
+_QUOTED_SPEECH = re.compile(
+    r"\b([A-Z][\w.'-]*(?:\s+[A-Z][\w.'-]*){0,3})\s+"
+    r"(?:said|says|told|shouted|yelled|replied|answered|remarked)\b", re.U)
+# Words that start a sentence in capitals and are not names. Without this, "I
+# said" and "He told me" attribute the speech to a pronoun.
+_NOT_A_NAME = {"i", "he", "she", "they", "we", "you", "it", "that", "this",
+               "who", "what", "when", "someone", "somebody", "nobody",
+               "everyone", "the", "a", "an", "and", "but", "then", "so"}
+_HEARD_SAY = re.compile(
+    r"\b(?:heard|watched|saw)\s+([A-Z][\w.'-]*(?:\s+[A-Z][\w.'-]*){0,3})\s+"
+    r"(?:say|saying|tell|telling|shout|shouting|yell|yelling)\b", re.U)
+
+
+def quoted_speaker(text: str) -> str:
+    """Who is speaking inside this text, when it is somebody else's words.
+
+    resolve_person's docstring has always promised "the quoted person for a
+    quotation inside it" and nothing ever implemented it, so first person inside
+    reported speech resolved to whoever's transcript it appeared in. That turned
+    "you will regret questioning me" - Morgan's words, aimed at Ellis, recorded
+    in Duran's interview - into a threat against Duran, a person who was not
+    party to it. A wrongly resolved pronoun leaves no residue, so unlike a
+    failed resolution it logs nothing and reads perfectly.
+
+    Only the FIRST attribution is taken, and only from before the pronoun, since
+    a name after it is being spoken about rather than speaking.
+    """
+    for pattern in (_HEARD_SAY, _QUOTED_SPEECH):
+        match = pattern.search(text or "")
+        if not match:
+            continue
+        name = match.group(1).strip()
+        # A bare rank is not a name, and neither is a sentence-initial word that
+        # only looks like one because it starts the line.
+        tokens = [t for t in normalize(name).split() if t]
+        if not tokens or all(t in RANKS or t in _NOT_A_NAME for t in tokens):
+            continue
+        return name
+    return ""
+
+
 def resolve_person(text: str, referent: str, speaker: str = "",
-                   addressed: bool = False) -> str:
+                   addressed: bool = False, reported: bool = False) -> str:
     """Put a name where the transcript left a pronoun.
 
     A CLAIM's text is the model's own label, so a bare "me" left inside one is
@@ -946,6 +991,14 @@ def resolve_person(text: str, referent: str, speaker: str = "",
             return name_for(referent, seen) + tail
 
         text = _sub_first_person(text, rewrite)
+    # Inside reported speech the second person is whoever the quoted speaker was
+    # addressing, and nothing here knows who that was. Morgan's "you will regret
+    # questioning me", recorded in Duran's interview, was aimed at Ellis;
+    # resolving it to the interviewee invents a threat against the person who
+    # merely overheard it - the same error on the other pronoun. Left as
+    # written, which is the one honest answer available.
+    if reported:
+        return text
     if speaker and (addressed
                     or normalize(speaker) != normalize(referent or "")):
         text = _SECOND.sub(
@@ -1429,6 +1482,14 @@ def validate(item: dict, page_text: str, header: str = "",
                 if str(item["subject_type"]).strip().upper() == "PERSON"
                 and not has_pronoun(as_written["subject_name"], around)
                 else speaker)
+    # Reported speech overrides both. "Morgan said you will regret questioning
+    # me" attributes the "me" to Morgan wherever it is recorded, and resolving
+    # it to the interviewee invents a remark about a person who was listening.
+    quoted = quoted_speaker(quote)
+    if quoted and normalize(quoted) != normalize(referent or ""):
+        log.info("first person inside reported speech resolves to %s, not %s",
+                 quoted, referent or speaker or "the interviewee")
+        referent = quoted
     addressed = bool(_QUESTION_TAG.match(quote))
     for role, type_field in (("subject_name", "subject_type"),
                              ("object_name", "object_type")):
@@ -1437,7 +1498,8 @@ def validate(item: dict, page_text: str, header: str = "",
         if not prose and not has_pronoun(str(item[role]), around):
             continue
         item[role] = resolve_person(str(item[role]), str(referent or ""),
-                                    speaker, addressed=addressed)
+                                    speaker, addressed=addressed,
+                                    reported=bool(quoted))
         # The repair is not guaranteed to succeed - a claim can be attributed
         # to the speaker themselves, which leaves the second person pointing at
         # somebody this page never names, and a page with no identified speaker

@@ -56,7 +56,7 @@ import hashlib
 import json
 import re
 
-from . import chat, embed, evidence, graph, llm_settings, state
+from . import chat, embed, evidence, graph, links, llm_settings, state
 from .log import get_logger, utcnow
 from .model_client import (Ollama, default_options, random_seed,
                            thinking_enabled)
@@ -419,7 +419,7 @@ that only exists because a document admits it is not an element of the claim.
 An element is one proposition that could separately be true or false - who did
 it, what act, to or with whom, in what capacity or position, under what
 qualifier (on duty, without consent, using government resources, contrary to
-policy), and how often. Take each element from the allegation's own words. Do
+policy). Take each element from the allegation's own words. Do
 not add an element the allegation does not assert. Do not merge two separate
 assertions into a single element.
 
@@ -434,10 +434,18 @@ an element made out of a citation can only ever fail for want of evidence that
 was never going to be there. Decompose the conduct the allegation describes and
 leave the authority out of the table.
 
-If the allegation's wording asserts that the conduct happened more than once - a
-plural act, a frequency word, a pattern, a course of conduct - then one element
-is the repetition itself, marked MULTIPLICITY: yes. Every other element is
-marked MULTIPLICITY: no.
+Frequency is an element only where the allegation makes it one. If its wording
+asserts that the conduct happened more than once - a plural act, a frequency
+word, a pattern, a course of conduct - then one element is the repetition
+itself, marked MULTIPLICITY: yes, and that element's WORDS field quotes the
+allegation's own wording that says so.
+
+Where the allegation describes a single occasion, or says nothing about how
+often, there is NO repetition element and you do not add one. A single
+unauthorised charge misuses the card; an allegation that does not allege a
+pattern is not answered by asking whether there was one, and adding that
+question raises what must be proved above what was alleged. Every element is
+then marked MULTIPLICITY: no.
 
 Output the elements and nothing else, in exactly this shape:
 
@@ -577,8 +585,14 @@ in exactly this shape:
 E<n> | ELEMENT: <the element>
    SUPPORTING: <each item of evidence for this element with its [filename p.N],
      one per line; "none">
-   OPPOSING: <each item of evidence against it with its [filename p.N], one per
-     line, including anything showing the act was voluntary, permitted,
+   OPPOSING: <affirmative contrary facts only - something that happened, was
+     said, was recorded or was permitted, each with its [filename p.N], one per
+     line. Absence is NOT opposing evidence: a line whose point is that
+     something is missing, unrecorded, not found, not documented or that no
+     record exists belongs under Gaps, and putting it here weighs the silence
+     of the corpus against the allegation as though the records had answered.
+     The test is whether the line asserts a fact about the world or a fact
+     about the file. Include anything showing the act was voluntary, permitted,
      compensated, declined without consequence, off duty, outside the capacity
      alleged, or otherwise not the conduct this element describes; any interest
      a source supporting it has in the outcome, such as discipline, a grievance
@@ -695,6 +709,27 @@ already in evidence and is not a gap):
 
 RELATIONSHIPS EXTRACTED FROM THE DOCUMENTS:
 {relationships}
+
+SUGGESTED CONNECTIONS - INFERENCE, NOT EVIDENCE. READ THE RULES BEFORE USING ANY
+OF THESE:
+These were not stated in any document. Each is one model's reading of two
+things that were, produced by a pass that compared the records with each other.
+It is often wrong, and it is wrong most confidently about statements that merely
+involve the same person. Treat every line below as a question - "do these two
+really stand in that relation?" - never as a fact.
+1. Nothing here is evidence and nothing here may be cited. There is no
+   [filename p.N] for any of it because it came from no page.
+2. A connection is only usable once you have confirmed it against the passages
+   and relationships above and can cite THOSE. Having confirmed it, cite the
+   documents and say nothing about this list.
+3. No element may be MET, no conflict confirmed, and no finding made, on one of
+   these alone. If the documents do not carry it, it does not carry.
+4. Where you follow one of these to material you would otherwise have missed,
+   and the documents then support what you found, end that finding with
+   {inferred_mark} so a reader knows what led you to it.
+5. A connection you cannot confirm is not a gap and is not a conflict. Ignore
+   it silently; it is not a fact about the case that something was suggested.
+{inferred}
 
 PASSAGES FROM THE DOCUMENTS:
 {passages}
@@ -935,13 +970,68 @@ def _format_passages(passages: list[dict], speakers: dict[str, str] | None = Non
     return "\n\n".join(blocks)
 
 
+# The marker a finding carries when it leans on an inferred connection. Checked
+# for afterwards, so the report can say which dispositions rested on something
+# no document states - a claim the prose alone could not support.
+INFERRED_MARK = "(inferred connection)"
+
+
+def _inferred_block(rows: list[dict]) -> str:
+    """Connections a model drew between two entities, labelled as exactly that.
+
+    These did not come out of any document. Each is a reading of two things that
+    did, produced by a pass that compares the corpus with itself - which finds
+    real contradictions that extraction cannot see, and also produces confident
+    nonsense at a measurable rate. Both facts have to reach the model reading
+    this, which is why the block is separate, named, and carries its own warning
+    rather than being folded in with the relationships above it.
+    """
+    if not rows:
+        return "(none)"
+    lines = []
+    for row in rows:
+        a, b = row.get("a_name") or row["a_id"], row.get("b_name") or row["b_id"]
+        if row.get("subject_id") == row["b_id"]:
+            a, b = b, a
+        lines.append(f"- \"{a}\"\n    {row['relation'].upper()} "
+                     f"(confidence {float(row.get('confidence') or 0):.2f})\n"
+                     f"  \"{b}\"\n    reason given: {row.get('basis') or '(none)'}")
+    return "\n".join(lines)
+
+
+# What the summary pass is shown of the chronology. The cap exists because the
+# summary prompt has to fit; it used to cut the record off partway through July
+# because duplicates from multi-source extraction spent the budget twice on the
+# same day. Merging first is what makes a cap this size cover the whole case.
+TIMELINE_SHOWN = 90
+
+
 def _timeline_block() -> str:
-    rows = graph.timeline() if graph.available() else []
+    rows = graph.merged_timeline() if graph.available() else []
     if not rows:
         return "(no dated events extracted)"
-    return "\n".join(
-        f"- {r['date']}: {r['subject']} {r['predicate']} {r['object']} "
-        f"[{r['source_file']} p.{r['source_page']}]" for r in rows[:60])
+    events = [r for r in rows if not r.get("is_statement")]
+    said = [r for r in rows if r.get("is_statement")]
+
+    def line(r: dict) -> str:
+        cites = " ".join(f"[{s['source_file']} p.{s['source_page']}]"
+                         for s in r.get("sources") or [])
+        return (f"- {r['date']}: {r['subject']} {r['predicate']} {r['object']} "
+                f"{cites}".rstrip())
+
+    block = "\n".join(line(r) for r in events[:TIMELINE_SHOWN])
+    if len(events) > TIMELINE_SHOWN:
+        block += (f"\n- ({len(events) - TIMELINE_SHOWN} further dated event(s) "
+                  f"not listed here)")
+    # Kept, because when somebody said a thing is often the point, but under
+    # their own heading: a characterisation printed among events reads as one.
+    if said:
+        room = max(0, TIMELINE_SHOWN - len(events))
+        if room:
+            block += ("\n\nSTATEMENTS MADE ON A DATE (what was said, not what "
+                      "happened):\n" +
+                      "\n".join(line(r) for r in said[:room]))
+    return block
 
 
 def _entities_block() -> str:
@@ -1264,11 +1354,25 @@ def _merge_candidates(blocks: list[str]) -> str:
                      for n, item in enumerate(merged, 1))
 
 
+# Hearsay is X reporting what Y TOLD them about something neither perceived.
+# It is a shape, not a verb: "I heard him call Ellis worthless" is direct
+# auditory perception - earwitness testimony, and the strongest evidence there
+# is for an allegation about something said - while "I heard from Jenkins that
+# he did" is a report of a report. A bare "i heard" matched both, so the best
+# evidence in the corpus was being discounted as the weakest.
 _SECONDHAND = re.compile(
-    r"\b(told me|told him|told her|told them|heard about|heard that|"
-    r"i heard|we heard|said that .{0,40}\bsaid\b|passed on|relayed|"
+    r"\b(told me|told him|told her|told them|"
+    r"heard (?:about|that|from)|heard it from|"
+    r"said that .{0,40}\bsaid\b|passed on|relayed|"
     r"secondhand|second hand|not firsthand|nothing firsthand|"
-    r"i was not there|was not present|did not see it)\b", re.I)
+    r"i was not there|was not present)\b", re.I)
+
+# Not hearsay. A witness who heard but could not see perceived the event; what
+# they could not observe is a limit on their account, which is worth recording
+# and is a different thing from repeating somebody else's.
+_OBSERVATION_LIMIT = re.compile(
+    r"\b(did not see it|could not see|couldn't see|only heard part|"
+    r"did not have a clear view|from where i was)\b", re.I)
 
 
 def _belongs_to_another(line: str, allegations: list[str], index: int) -> int:
@@ -1332,16 +1436,35 @@ def _secondhand_facts(number: int) -> list[dict]:
             "FROM triples")
     except Exception:
         return []
-    out = []
+    out, seen = [], set()
     for r in rows:
         ref = str(r["allegation_ref"] or "")
         if ref and ref.strip() != str(number):
             continue
         quote = str(r["quote"] or "")
+        # One quote span usually backs several assertions, so without this the
+        # same sentence is listed once per assertion drawn from it and a single
+        # piece of hearsay reads as a pile of it.
+        key = " ".join(quote.split()).casefold()
+        if not key or key in seen:
+            continue
         if _SECONDHAND.search(quote):
+            seen.add(key)
             out.append({"subject": r["subject_name"], "quote": quote,
                         "source_file": r["doc_id"], "source_page": r["page_num"]})
     return out
+
+
+def _clip(text: str, limit: int = 110) -> str:
+    """Shorten a quote without cutting a word in half."""
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    space = cut.rfind(" ")
+    if space > limit // 2:
+        cut = cut[:space]
+    return cut.rstrip(" ,;:.") + "…"
 
 
 def _secondhand_note(facts: list[dict]) -> str:
@@ -1355,14 +1478,18 @@ def _secondhand_note(facts: list[dict]) -> str:
     for in the prompt, because a disclosure that appears only when the model
     remembers it is not a disclosure a reader can rely on.
     """
-    hits = []
+    hits, seen = [], set()
     for f in facts:
         quote = str(f.get("quote") or "")
-        if _SECONDHAND.search(quote):
-            who = str(f.get("subject") or f.get("subject_name") or "").strip()
-            cite = (f" [{f['source_file']} p.{f['source_page']}]"
-                    if f.get("source_file") else "")
-            hits.append(f"{who}: \"{quote[:110]}\"{cite}" if who else quote[:110])
+        key = " ".join(quote.split()).casefold()
+        if not key or key in seen or not _SECONDHAND.search(quote):
+            continue
+        seen.add(key)
+        who = str(f.get("subject") or f.get("subject_name") or "").strip()
+        cite = (f" [{f['source_file']} p.{f['source_page']}]"
+                if f.get("source_file") else "")
+        shown = _clip(quote)
+        hits.append(f"{who}: \"{shown}\"{cite}" if who else shown)
     if not hits:
         return ""
     listed = "\n".join(f"  - {h}" for h in hits[:4])
@@ -1572,6 +1699,51 @@ def _elements_for(allegation: str, raw: str) -> tuple[list[dict], str]:
             "proposition. Read the weighing below with that in mind - an "
             "allegation tested undecomposed can be carried by evidence that "
             "answers only part of it.*")
+
+
+# Wording that makes repetition part of what is alleged. Read against the
+# ALLEGATION, never against the evidence or the model's paraphrase of it.
+_REPETITION = re.compile(
+    r"\b(repeated(?:ly)?|repetition|multiple|several|various|numerous|"
+    r"routine(?:ly)?|regular(?:ly)?|habitual(?:ly)?|persistent(?:ly)?|"
+    r"continu(?:ed|ing|ous|ously)|ongoing|pattern|practice|course of conduct|"
+    r"on (?:more than one|several|multiple|numerous) occasions|"
+    r"each|every|daily|weekly|monthly|times)\b", re.I)
+
+
+def _drop_invented_repetition(items: list[dict],
+                              allegation: str) -> tuple[list[dict], str]:
+    """Demote a repetition element the allegation never asserted.
+
+    An invented multiplicity element does not bias a disposition, it decides
+    one: _correct_element_rows forces MET: No when such an element cannot show
+    two occasions, and a single MET: No forces the adverse label. So an
+    allegation about one unauthorised charge, given an element asking whether
+    the charge was habitual, can only come back NOT SUBSTANTIATED - not on the
+    evidence but on a question nobody asked.
+
+    A veto was tried here before and removed for one-directional bias: it only
+    ever ADDED repetition, so it could turn a single-occasion allegation into a
+    pattern one and never the reverse. This one only ever removes, and only
+    where the allegation's own words carry no repetition at all - which is
+    checking the instruction the decomposition was just given, not forming a
+    second opinion about it. Where the allegation does assert repetition, the
+    decomposition's answer stands untouched, whatever it is.
+    """
+    if _REPETITION.search(allegation or ""):
+        return items, ""
+    demoted = [e for e in items if e.get("multiplicity")]
+    if not demoted:
+        return items, ""
+    for element in demoted:
+        element["multiplicity"] = False
+    numbers = ", ".join(f"E{e['n']}" for e in demoted)
+    log.warning("allegation wording asserts no repetition, so %s was not "
+                "weighed as a course of conduct", numbers)
+    return items, (
+        f"{numbers} was decomposed as requiring repeated conduct, which this "
+        f"allegation does not allege; it was weighed as a single occasion "
+        f"instead")
 
 
 def _elements_block(items: list[dict]) -> str:
@@ -2608,6 +2780,44 @@ def generate(goal: str | None = None, allegations: list[str] | None = None, *,
     labels = disposition_labels()
     system = SYSTEM_TEMPLATE.format(yes_label=labels[0], no_label=labels[1])
 
+    # The objective outlives its corpus - it is kept in settings so it survives
+    # a restart - and nothing used to check the documents underneath it were
+    # still the ones it was written for. A purge followed by a different upload
+    # then produces a report weighing elements against records that never
+    # mention the subject. Refused here, before a single model call, rather than
+    # noticed twenty pages in.
+    fit = evidence.objective_match(goal, allegations)
+    if not fit["matched"] and fit["others"]:
+        log.error("objective/corpus mismatch: the objective names none of the "
+                  "%d person(s) in this corpus", len(fit["others"]))
+        yield "error", (
+            f"Report refused: the objective and the corpus are about different "
+            f"cases. The objective names none of the people these documents do."
+            f"\n\nThese documents are about: "
+            f"{', '.join(fit['others'][:8])}"
+            f"{' and others' if len(fit['others']) > 8 else ''}."
+            f"\n\n{fit['documents']} document(s) ingested, none naming anyone "
+            f"the objective names. Nothing has been written. Either load the "
+            f"corpus this objective was written for, or set the objective for "
+            f"the corpus that is loaded.")
+        return
+    if fit.get("isolated"):
+        names = {d["doc_id"]: d["filename"] for d in docs}
+        log.warning("%s share no person with any other document; that is normal "
+                    "for a records custodian and is not treated as a fault",
+                    ", ".join(names.get(d, d) for d in fit["isolated"]))
+    if fit["foreign"]:
+        names = {d["doc_id"]: d["filename"] for d in docs}
+        listed = ", ".join(names.get(d, d) for d in fit["foreign"])
+        log.error("corpus contamination: %s share no person with any other "
+                  "document", listed)
+        yield "error", (
+            f"Report refused: {len(fit['foreign'])} document(s) share no person "
+            f"with any other document in this corpus, which is what a file from "
+            f"a different case looks like: {listed}. Remove them, or re-ingest "
+            f"the corpus this objective belongs to. Nothing has been written.")
+        return
+
     # Named before it happens: on a cold endpoint this call is the pull of a
     # multi-gigabyte model, and it sits between the click and the first
     # allegation with nothing else to show for the wait.
@@ -2657,8 +2867,23 @@ def generate(goal: str | None = None, allegations: list[str] | None = None, *,
         facts = evidence.enrich(chat.relationships_for(allegation, passages), index_map)
         passages, facts = evidence.route(passages, facts, index, index_map)
         passages = passages[:MAX_PASSAGES]
+        # Connections drawn over this allegation's own material. Selected here
+        # rather than at writing time so a report says in one place which
+        # allegations were shown inference at all.
+        pages = {(p["doc_id"], p["page_num"]) for p in passages
+                 if p.get("doc_id") and p.get("page_num") is not None}
+        try:
+            suggested = links.for_pages(pages)
+        except Exception as exc:
+            # Inference is an extra. A report is written from documents, and a
+            # fault in the part that is not evidence must not stop the part
+            # that is.
+            log.error("the suggested connections could not be read: %s", exc)
+            suggested = []
         contexts.append({"index": index, "allegation": allegation,
-                         "passages": passages, "facts": facts})
+                         "passages": passages, "facts": facts,
+                         "suggested": suggested,
+                         "inferred_block": _inferred_block(suggested)})
 
     # The corpus is read again now that retrieval is finished. A report is
     # several model passes per allegation on local hardware, and a document
@@ -2724,6 +2949,12 @@ def generate(goal: str | None = None, allegations: list[str] | None = None, *,
                 break
             log.warning("allegation %d: the element pass returned something "
                         "unreadable on attempt %d", index, attempt)
+        # After the retry loop, not inside it: element_note is what asks for a
+        # second draw, and a decomposition corrected here was readable - asking
+        # again would spend a call to be told the same thing.
+        elements, invented = _drop_invented_repetition(elements, allegation)
+        if invented:
+            element_note = f"{element_note}; {invented}" if element_note else invented
         element_block = _elements_block(elements)
 
         # Conflict detection gets its own pass with nothing else to do. Asked
@@ -2771,6 +3002,7 @@ def generate(goal: str | None = None, allegations: list[str] | None = None, *,
             conflicts=conflict_candidates, corroboration=corroboration,
             speakers=speaker_note, manifest=manifest,
             relationships=relationships, passages=passage_block,
+            inferred=ctx["inferred_block"], inferred_mark=INFERRED_MARK,
             yes_label=labels[0], no_label=labels[1])
 
         # A table that does not weigh every element it was given is a failure
@@ -2857,6 +3089,18 @@ def generate(goal: str | None = None, allegations: list[str] | None = None, *,
 
         section, verdict, review = _settle_disposition(section, rows, elements,
                                                        index, labels)
+        # A finding that followed a suggested connection says so, and that has
+        # to survive into the dispositions table. A reader who cannot tell which
+        # findings were reached that way cannot apply the discount they deserve,
+        # and the marker alone sits too deep in the section to be seen.
+        leaned = section.count(INFERRED_MARK)
+        if leaned:
+            log.info("allegation %d: %d finding(s) followed a suggested "
+                     "connection", index, leaned)
+            note = (f"{leaned} finding(s) reached by following a suggested "
+                    f"connection, which is inference rather than testimony")
+            review = f"{review}; {note}" if review else note
+
         if element_note:
             # The decomposition itself was degraded - no elements at all, or an
             # element whose repetition marking could not be read - and the

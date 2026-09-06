@@ -305,6 +305,76 @@ def inferred_edges(limit: int = 2000) -> list[dict]:
                ORDER BY r.confidence DESC LIMIT $limit""", limit=limit)]
 
 
+def merged_timeline() -> list[dict]:
+    """The timeline with one entry per event, and statements kept apart.
+
+    Two problems the raw query cannot solve, because both are about how rows
+    relate to each other rather than what any row says.
+
+    Duplicates: triple_id hashes the document and page, so two witnesses
+    describing 18 March are two distinct edges and arrive as two events. Showing
+    them separately overstates the record - it turns corroboration, which is
+    two sources for one event, into twice as much happening. They are merged on
+    what actually identifies an event (its date and the assertion made about it)
+    and their citations are stacked.
+
+    Statements: a "PERSON stated CLAIM" row is structurally identical to a fact
+    row and renders identically, so "the incident with Pike was a normal
+    correction delivered rudely" - a characterisation, argued about rather than
+    dated - sits in the chronology as though it were a thing that happened on a
+    day. They are kept, because when somebody said something is often the point,
+    but marked so a reader and the report can tell the two apart.
+    """
+    with driver().session() as session:
+        rows = [dict(r) for r in session.run(
+            """MATCH (a:Entity)-[r]->(b:Entity)
+               WHERE r.triple_id IS NOT NULL AND r.event_date IS NOT NULL
+                     AND r.event_date <> ''
+               RETURN r.event_date AS date,
+                      r.event_date_basis AS basis,
+                      a.name AS subject, r.predicate AS predicate,
+                      b.name AS object, b.type AS object_type,
+                      r.source_file AS source_file,
+                      r.source_doc AS source_doc, r.source_page AS source_page,
+                      r.quote AS quote
+               ORDER BY r.event_date""")]
+
+    merged: dict[tuple, dict] = {}
+    for row in rows:
+        predicate = (row.get("predicate") or "").strip().casefold()
+        row["is_statement"] = (predicate == "stated"
+                               and (row.get("object_type") or "") == "CLAIM")
+        # The date is part of the identity but only to the day: the same event
+        # given a time by one witness and not by another is one event.
+        key = (str(row.get("date") or "")[:10],
+               (row.get("subject") or "").casefold(),
+               predicate,
+               (row.get("object") or "").casefold())
+        first = merged.get(key)
+        if first is None:
+            row["sources"] = [{"source_file": row.get("source_file"),
+                               "source_doc": row.get("source_doc"),
+                               "source_page": row.get("source_page"),
+                               "quote": row.get("quote")}]
+            merged[key] = row
+            continue
+        seen = {(s.get("source_doc"), s.get("source_page"))
+                for s in first["sources"]}
+        if (row.get("source_doc"), row.get("source_page")) not in seen:
+            first["sources"].append({"source_file": row.get("source_file"),
+                                     "source_doc": row.get("source_doc"),
+                                     "source_page": row.get("source_page"),
+                                     "quote": row.get("quote")})
+        # Keep the more precise of two dates for the same event: a witness who
+        # gave a time said more than one who gave only the day.
+        if len(str(row.get("date") or "")) > len(str(first.get("date") or "")):
+            first["date"] = row["date"]
+            first["basis"] = row.get("basis")
+    out = list(merged.values())
+    out.sort(key=lambda r: (str(r.get("date") or ""), r.get("subject") or ""))
+    return out
+
+
 def clear() -> None:
     with driver().session() as session:
         session.run("MATCH (n) DETACH DELETE n")

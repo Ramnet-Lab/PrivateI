@@ -20,9 +20,18 @@ alongside a fact.</p>
     </div>
     <div class="what">
       <strong>{{ r.subject }}</strong> {{ r.predicate }} <strong>{{ r.object }}</strong>
-      <blockquote>“{{ r.quote }}”</blockquote>
-      <a class="small" href="/documents/{{ r.source_doc }}#page-{{ r.source_page }}">
-        {{ r.source_file }} · page {{ r.source_page }}</a>
+      {% if r.is_statement %}<span class="tag">statement, not an event</span>{% endif %}
+      {# One entry per event, with every source that described it stacked
+         beneath. Two witnesses to one afternoon is corroboration; printed as
+         two entries it reads as two afternoons. #}
+      {% for s in r.sources %}
+      <blockquote>“{{ s.quote }}”</blockquote>
+      <a class="small" href="/documents/{{ s.source_doc }}#page-{{ s.source_page }}">
+        {{ s.source_file }} · page {{ s.source_page }}</a>
+      {% endfor %}
+      {% if r.sources|length > 1 %}
+      <span class="small">{{ r.sources|length }} sources describe this</span>
+      {% endif %}
     </div>
   </li>
   {% endfor %}
