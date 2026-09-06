@@ -206,6 +206,24 @@ DISK_GB="$(df -Pk . | awk 'NR==2 {print int($4/1048576)}')"
 
 # --- build and start ----------------------------------------------------------
 step "Building images (first run takes a few minutes)"
+# Take any push before building, so a start is always a start on the current
+# version. The watcher keeps a running deployment current afterwards, but it
+# cannot help the first start of the day: without this, a machine that has been
+# off for a week builds week-old code and looks perfectly healthy doing it.
+if [ -d .git ] && command -v git >/dev/null 2>&1; then
+  if git remote get-url origin >/dev/null 2>&1; then
+    step "Fetching the latest version"
+    if git pull -q --ff-only origin main 2>/dev/null; then
+      printf '    up to date with origin/main\n'
+    else
+      # Not fatal. A local change, no network, or a diverged branch all land
+      # here, and none of them is a reason to refuse to start what is already
+      # on disk - said plainly so nobody believes they are running the latest.
+      printf '    %scould not fast-forward; starting the version on disk%s\n' "$Y" "$Z"
+    fi
+  fi
+fi
+
 $COMPOSE build
 
 step "Starting services"

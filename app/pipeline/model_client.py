@@ -31,6 +31,18 @@ here: a run binds a CancelToken to its thread, requests issued on that thread
 are made in a form another thread can interrupt, and an interrupted one raises
 Cancelled - which is deliberately not a ModelRunnerError, because nothing
 failed and there is nothing to retry.
+
+Fourth, one endpoint an operator is likely to type the address of speaks two
+dialects, and only one of them listens to us. Ollama serves an
+OpenAI-compatible API at /v1 and its own at /api. The compatible one accepts a
+request and silently drops the options it has no field for - num_ctx among them
+- so a long chunk met the server's own small default context, the model spent
+the whole window reasoning, and every call returned finish_reason "length" with
+empty content. The native /api/chat carries those options in an "options"
+object and honours them. Which dialect an address speaks cannot be told from
+the address, so it is a setting; this module builds and reads whichever shape
+the flavour names, and every method below keeps its signature so no caller has
+to know which one it got.
 """
 from __future__ import annotations
 
@@ -44,6 +56,7 @@ import socket
 import threading
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -309,6 +322,44 @@ def _close_handle(handle: Any) -> None:
 # inside a slow body rather than after it.
 BODY_CHUNK = 65536
 
+# The two request dialects. Defined here, where both shapes are actually
+# built, and imported by llm_settings so the stored value and the code that
+# acts on it cannot drift apart by a typo.
+FLAVOR_OPENAI = "openai"
+FLAVOR_OLLAMA = "ollama"
+
+# The capability probe gets its own short timeout rather than the request one.
+# It is asked from a settings page while an operator watches a button, and the
+# request timeout here is measured in minutes because it was chosen for a model
+# generating tokens, not for a server answering a question about itself.
+CAPABILITY_TIMEOUT = 10
+
+
+@dataclass(frozen=True)
+class Capabilities:
+    """What an endpoint says a model can do, or the reason it could not say.
+
+    Three states, not two, and the difference between the last two is the
+    point of this class. "vision is listed" and "vision is not listed" are both
+    answers from the server; "the server was not able to be asked" is not an
+    answer at all, and a caller that collapses it into either of the others is
+    either refusing work that would have succeeded or promising a check that
+    never happened. known says which kind of result this is; detail says why
+    when it is the third kind, in words that can go on a page.
+    """
+
+    known: bool
+    values: tuple[str, ...] = ()
+    detail: str = ""
+
+    def has(self, name: str) -> bool:
+        return name.strip().lower() in self.values
+
+    @property
+    def vision(self) -> bool | None:
+        """True, False, or None when the endpoint could not be asked."""
+        return self.has("vision") if self.known else None
+
 DEFAULT_URL = "http://model-runner.docker.internal/v1"
 # The socket path prefix carries the Docker Desktop version and will move;
 # overridable for that day rather than hard-coded until it breaks.
@@ -340,6 +391,25 @@ def _normalize_url(url: str) -> str:
     if not base.endswith("/v1"):
         base += "/v1"
     return base
+
+
+def _native_url(url: str) -> str:
+    """The same address with the OpenAI compatibility suffix taken off.
+
+    An operator configuring an OpenAI-compatible endpoint types the /v1 base,
+    because that is what every other client asks for and what this one has
+    always required. Ollama's native routes are siblings of that suffix rather
+    than children of it - /api/chat, not /v1/api/chat - so the suffix is
+    removed here instead of the operator being told to retype an address that
+    was correct yesterday. Anything that does not end in /v1 is left alone,
+    which is what makes typing the bare host work too.
+    """
+    base = (url or "").strip().rstrip("/")
+    if not base:
+        base = DEFAULT_URL
+    if base.endswith("/v1"):
+        base = base[:-len("/v1")]
+    return base.rstrip("/")
 
 
 # --------------------------------------------------------------------------
@@ -409,7 +479,8 @@ class _UnixHTTP:
 class ModelRunner:
     def __init__(self, url: str | None = None, timeout: int | None = None,
                  retries: int | None = None, keep_alive: str | None = None,
-                 api_key: str | None = None, allow_override: bool = True):
+                 api_key: str | None = None, allow_override: bool = True,
+                 flavor: str | None = None, from_settings: bool | None = None):
         # keep_alive is accepted and ignored: residency is Model Runner's own
         # business. Old env names are honoured so an existing .env keeps
         # working after the swap.
@@ -428,16 +499,44 @@ class ModelRunner:
         # cannot be used, and answering that with the local model would be the
         # substitution this whole mechanism exists to prevent.
         override_url, override_key = "", ""
+        override_flavor = ""
         if url is None and allow_override:
-            from .llm_settings import client_override
+            from .llm_settings import api_flavor, client_override
             override_url, override_key = client_override()
+            # The dialect is read on exactly the clients that read the endpoint
+            # - a bare one, in external mode. Embeddings and transcription name
+            # their url and pass allow_override=False, so they never reach this
+            # branch and stay on the OpenAI dialect they have always spoken,
+            # whatever the operator ticked for the text model.
+            override_flavor = api_flavor()
+        # Anything that is not exactly the native marker is the OpenAI dialect.
+        # That is the behaviour that existed before this setting, so an unset
+        # value, an older database and a word nothing here recognises all leave
+        # every request byte for byte as it was.
+        chosen = (flavor if flavor is not None else override_flavor)
+        self.flavor = (FLAVOR_OLLAMA
+                       if str(chosen or "").strip().lower() == FLAVOR_OLLAMA
+                       else FLAVOR_OPENAI)
         # Whether the address came from the operator rather than from .env or
         # the built-in default. require_model needs it: the remedy for a model
         # this endpoint does not serve is a different remedy in each case.
-        self.from_settings = bool(override_url)
+        #
+        # A caller that resolved the address itself has to be able to say so.
+        # Transcription does exactly that: it names its endpoint explicitly so
+        # that nothing can substitute one underneath it, and without this
+        # argument its errors would advise setting MODEL_URL - an environment
+        # variable the operator never touched, when the address in fact came
+        # from a field on the settings page. None keeps the old inference, so
+        # every existing caller behaves exactly as it did.
+        self.from_settings = (bool(override_url) if from_settings is None
+                              else bool(from_settings))
         raw_url = (url or override_url
                    or env_str("MODEL_URL", "") or env_str("OLLAMA_URL", ""))
-        self.url = _normalize_url(raw_url or DEFAULT_URL)
+        # One address, two shapes: the native routes do not live under /v1, and
+        # self.url is what every request path and every error message is built
+        # from, so the suffix is resolved once here rather than at each use.
+        self.url = (_native_url(raw_url or DEFAULT_URL) if self.is_ollama
+                    else _normalize_url(raw_url or DEFAULT_URL))
         self.api_key = api_key if api_key is not None else override_key
         self.timeout = timeout if timeout is not None else (
             env_int("MODEL_TIMEOUT", 0) or env_int("OLLAMA_TIMEOUT", 1800))
@@ -458,11 +557,44 @@ class ModelRunner:
         # reported the remote endpoint healthy on the strength of it.
         local = _normalize_url(env_str("MODEL_URL", "")
                                or env_str("OLLAMA_URL", "") or DEFAULT_URL)
-        self.socket_path = (os.environ.get("MODEL_RUNNER_SOCKET", "")
-                            if self.url == local else "")
+        # The native dialect is named for someone else's server, so the socket
+        # is refused outright rather than left to the address comparison. The
+        # comparison would already fail - a native url carries no /v1 - but
+        # relying on that would make the socket depend on a suffix rather than
+        # on what is actually true, which is that the built-in runner does not
+        # speak this dialect.
+        self.socket_path = ("" if self.is_ollama else
+                            (os.environ.get("MODEL_RUNNER_SOCKET", "")
+                             if self.url == local else ""))
         self.session = requests.Session()
 
     # -- plumbing ------------------------------------------------------------
+
+    @property
+    def is_ollama(self) -> bool:
+        """True when this client talks to Ollama in its own dialect."""
+        return self.flavor == FLAVOR_OLLAMA
+
+    @property
+    def _chat_path(self) -> str:
+        return "/api/chat" if self.is_ollama else "/chat/completions"
+
+    def _bind_hint(self) -> str:
+        """What to say when the endpoint could not be reached at all.
+
+        The Docker Model Runner instructions are the right answer for the
+        built-in runner and useless against a server on the network: an
+        operator whose Ollama box is asleep does not need to be told to enable
+        a Docker Desktop feature.
+        """
+        if self.is_ollama:
+            return (f"Cannot reach an Ollama server at {self.url}.\n"
+                    f"\n"
+                    f"Check that the machine is up and 'ollama serve' is "
+                    f"running, and that the address is the server's own, not "
+                    f"a proxy. The native API is at {self.url}/api/tags; if "
+                    f"that address is wrong the settings page will say so.")
+        return BIND_HINT.format(url=self.url)
 
     def _headers(self) -> dict:
         """Request headers, carrying the key only when one is configured.
@@ -556,7 +688,7 @@ class ModelRunner:
                     raise
         if isinstance(last, ModelRunnerError):
             raise last
-        raise ModelRunnerError(BIND_HINT.format(url=self.url)) from last
+        raise ModelRunnerError(self._bind_hint()) from last
 
     def _backoff(self, attempt: int, token: CancelToken | None) -> None:
         """Wait before trying again - but not through an abort.
@@ -671,14 +803,35 @@ class ModelRunner:
             response.close()
         return b"".join(pieces)
 
-    @staticmethod
-    def _raise_api_error(status: int, body: bytes) -> None:
+    def _raise_api_error(self, status: int, body: bytes) -> None:
         try:
             detail = json.loads(body)
-            message = (detail.get("error") or {}).get("message") or str(detail)
+            error = detail.get("error")
+            # Ollama's native API reports the error as a bare string where the
+            # OpenAI dialect nests a message inside an object. Reading only the
+            # nested shape threw AttributeError inside this try and fell
+            # through to the raw bytes, which turned a plain "model not found"
+            # into a slice of JSON.
+            if isinstance(error, str):
+                message = error
+            else:
+                message = (error or {}).get("message") or str(detail)
         except Exception:
             message = body[:300].decode(errors="replace")
-        raise ModelRunnerError(f"Model Runner rejected the request ({status}): {message}")
+        # The prefix is deliberately the same on both paths: callers and the
+        # settings page match on the error type, and operators have seen this
+        # wording before.
+        text = f"Model Runner rejected the request ({status}): {message}"
+        if self.is_ollama and "think" in message.lower():
+            # Ollama grew its "think" field in 0.9. Older servers ignore an
+            # unknown field, and newer ones reject it for models that cannot
+            # reason - which is a rejection of the very request that was meant
+            # to turn reasoning off. Name the escape hatch rather than leaving
+            # the operator to guess which field the server disliked.
+            text += ("\nThis server rejected the request's 'think' field. Set "
+                     "MODEL_THINKING=1 in .env to stop sending it (reasoning "
+                     "then stays at the server's default), or update Ollama.")
+        raise ModelRunnerError(text)
 
     @staticmethod
     def _parse_json(raw) -> dict:
@@ -706,7 +859,12 @@ class ModelRunner:
                 if status != 200:
                     raise ModelRunnerError(f"/models returned {status}")
             else:
-                response = self.session.get(f"{self.url}/models", timeout=30,
+                # The two dialects publish their catalogue at different
+                # addresses. Asking the wrong one gets a 404 from a server that
+                # is working perfectly, which the settings page would then
+                # report as a broken endpoint.
+                listing = "/api/tags" if self.is_ollama else "/models"
+                response = self.session.get(f"{self.url}{listing}", timeout=30,
                                             headers=self._headers())
                 response.raise_for_status()
                 data = response.content
@@ -717,15 +875,106 @@ class ModelRunner:
             # permission, 404 usually a base URL missing its /v1.
             status = (exc.response.status_code
                       if exc.response is not None else "an error")
+            # The /v1 remedy is the wrong advice on the native path, where the
+            # suffix is removed on purpose: a 404 there means the address is
+            # not an Ollama server, or is a proxy in front of one.
+            remedy = ("a 404 usually means this address is not an Ollama "
+                      "server - untick the Ollama box if it is not."
+                      if self.is_ollama else
+                      "a 404 usually means the address needs its /v1 suffix.")
             raise ModelRunnerError(
                 f"{self.url} answered {status}. The address is reachable, so "
                 f"check the model endpoint settings - a 401 means the API key, "
-                f"a 404 usually means the address needs its /v1 suffix."
+                f"{remedy}"
             ) from exc
         except (requests.exceptions.RequestException, OSError) as exc:
-            raise ModelRunnerError(BIND_HINT.format(url=self.url)) from exc
+            raise ModelRunnerError(self._bind_hint()) from exc
         parsed = self._parse_json(data)
+        if self.is_ollama:
+            # /api/tags answers {"models": [{"name": "qwen3:32b", ...}, ...]};
+            # the name carries its tag, which is what require_model compares.
+            return sorted(m.get("name", "")
+                          for m in parsed.get("models", []) if m.get("name"))
         return sorted(m.get("id", "") for m in parsed.get("data", []) if m.get("id"))
+
+    def capabilities(self, model: str) -> Capabilities:
+        """Ask the endpoint what this model can do, if it can be asked at all.
+
+        Ollama publishes this at /api/show, and a vision model answers with
+        "vision" among its capabilities - measured against a real server:
+        hf.co/unsloth/GLM-4.6V-Flash-GGUF:Q8_K_XL reports ["tools", "thinking",
+        "completion", "vision"]. That is worth asking for because the
+        alternative is taking a model name on trust, and a text-only model
+        handed a page image does not fail: it invents a page and the invention
+        becomes evidence.
+
+        The OpenAI dialect has no equivalent route, so this returns "not known"
+        there rather than guessing. Guessing in either direction is worse than
+        admitting the gap - a guessed yes is the failure above, and a guessed
+        no would refuse to transcribe on a server that was perfectly capable.
+
+        Nothing here raises for a network or HTTP failure. This is a question
+        about a model, asked while an operator watches a settings page or just
+        before a document is transcribed, and neither caller is helped by an
+        exception where the honest answer is "this endpoint would not say".
+        The real failure, if there is one, arrives at the request that follows.
+        """
+        model = (model or "").strip()
+        # A cancelled run must not start another request, even a cheap one.
+        raise_if_cancelled()
+        if not model:
+            return Capabilities(False, detail="no model name was given")
+        if not self.is_ollama:
+            return Capabilities(
+                False,
+                detail=(f"{self.url} speaks the OpenAI dialect, which has no "
+                        f"route that reports what a model can do"))
+        # Both keys carry the name: Ollama's own field was "name" before it
+        # became "model", and a server that reads only the older one would
+        # otherwise answer about nothing at all. An unknown field is ignored by
+        # both, so sending the pair costs a few bytes and no risk.
+        body = json.dumps({"model": model, "name": model}).encode("utf-8")
+        try:
+            response = self.session.post(f"{self.url}/api/show", data=body,
+                                         headers=self._headers(),
+                                         timeout=CAPABILITY_TIMEOUT)
+        except (requests.exceptions.RequestException, OSError) as exc:
+            return Capabilities(
+                False, detail=f"{self.url} could not be asked about {model}: {exc}")
+        try:
+            if response.status_code >= 400:
+                # A 404 here is usually a model this server does not have, and
+                # a 401 is the key. Either way the caller's own model check
+                # says it better than a capability probe can, so this only
+                # reports that the question went unanswered.
+                return Capabilities(
+                    False,
+                    detail=(f"{self.url}/api/show answered "
+                            f"{response.status_code} for {model}"))
+            try:
+                parsed = json.loads(response.content)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return Capabilities(
+                    False, detail=f"{self.url}/api/show sent a non-JSON reply")
+        finally:
+            response.close()
+        listed = parsed.get("capabilities") if isinstance(parsed, dict) else None
+        if not isinstance(listed, list):
+            return Capabilities(
+                False,
+                detail=(f"{self.url} answered about {model} but does not "
+                        f"report capabilities - Ollama began listing them in "
+                        f"0.6, and a proxy in front of one may drop them"))
+        values = tuple(str(v).strip().lower() for v in listed if str(v).strip())
+        if not values:
+            # An empty list is not the statement "this model can do nothing";
+            # it is a server that filled the field in without meaning anything
+            # by it. Reading it as a definite "no vision" would refuse a model
+            # that may well be capable, on the strength of no evidence.
+            return Capabilities(
+                False,
+                detail=f"{self.url} reported an empty capability list for {model}")
+        return Capabilities(True, values)
 
     @staticmethod
     def _same_model(a: str, b: str) -> bool:
@@ -838,9 +1087,126 @@ class ModelRunner:
         if isinstance(limit, int) and limit > 0:
             payload["max_tokens"] = limit
         # num_ctx has no equivalent here - the server sizes its own context.
+        # That is a statement about this dialect, not about the model: the
+        # native payload below does carry it, which is the whole reason the
+        # flavour switch exists.
         if format_json:
             payload["response_format"] = {"type": "json_object"}
         return payload
+
+    @staticmethod
+    def _native_messages(prompt: str, system: str | None,
+                         images: list[Path] | None) -> list[dict]:
+        """Messages in Ollama's own shape.
+
+        The difference from the OpenAI dialect is images: they are bare base64
+        strings on the message rather than data: URLs in a content array. No
+        caller in this pipeline sends images on this path today - transcription
+        names its own local endpoint - but a message built the OpenAI way would
+        be accepted here and the picture silently ignored, which is the failure
+        this whole module exists to stop repeating.
+        """
+        messages: list[dict] = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        user: dict[str, Any] = {"role": "user", "content": prompt}
+        if images:
+            user["images"] = [base64.b64encode(p.read_bytes()).decode("ascii")
+                              for p in images]
+        messages.append(user)
+        return messages
+
+    @staticmethod
+    def _native_options(options: dict | None) -> dict:
+        """The sampling options Ollama takes in its "options" object.
+
+        num_ctx is the point of the exercise. Sent here it is honoured; sent to
+        the same server's /v1 endpoint it is accepted and discarded, and the
+        model then meets a 6000-character chunk with whatever small default the
+        server was started with. The rest travel with it because they are
+        dropped by that endpoint in exactly the same way.
+        """
+        options = options or {}
+        native: dict[str, Any] = {}
+        for name in ("num_ctx", "temperature", "seed"):
+            if name in options:
+                native[name] = options[name]
+        # num_predict <= 0 means uncapped to every caller here. Ollama reads 0
+        # as "predict nothing", so an uncapped call must omit the field rather
+        # than pass the number through.
+        limit = options.get("num_predict")
+        if isinstance(limit, int) and limit > 0:
+            native["num_predict"] = limit
+        return native
+
+    @staticmethod
+    def _native_payload(model: str, messages: list[dict], options: dict | None,
+                        format_json: bool, stream: bool,
+                        think: bool | None = None) -> dict:
+        """The body for /api/chat.
+
+        "think": false is this dialect's way of saying what
+        chat_template_kwargs says in the other one, and it is sent only when
+        reasoning is switched off - the default. Ollama added the field in 0.9;
+        an older server ignores an unknown field, and a newer one rejects it
+        for a model with no reasoning to turn off, which _raise_api_error names
+        along with the way out.
+        """
+        payload: dict[str, Any] = {"model": model, "messages": messages,
+                                   "stream": stream}
+        native_options = ModelRunner._native_options(options)
+        if native_options:
+            payload["options"] = native_options
+        enabled = thinking_enabled() if think is None else think
+        if not enabled:
+            payload["think"] = False
+        if format_json:
+            payload["format"] = "json"
+        return payload
+
+    def _chat_body(self, model: str, prompt: str, system: str | None,
+                   images: list[Path] | None, options: dict | None,
+                   format_json: bool, stream: bool,
+                   think: bool | None = None) -> dict:
+        """One request body in whichever dialect this client speaks."""
+        if self.is_ollama:
+            return self._native_payload(
+                model, self._native_messages(prompt, system, images),
+                options, format_json, stream, think)
+        return self._payload(model, self._messages(prompt, system, images),
+                             options, format_json, stream, think)
+
+    def _reply_parts(self, parsed: dict, *, previous_reasoning: str = "",
+                     previous_finish: str | None = None,
+                     previous_usage: dict | None = None
+                     ) -> tuple[str, str, str | None, dict]:
+        """One whole reply reduced to answer, reasoning, reason and counts.
+
+        Both dialects say the same four things in different places, and every
+        check after this point - the starvation detection above all - reads
+        them by these names. The previous_* arguments exist for the retry in
+        generate(): a second reply that is missing a field must leave the first
+        reply's value standing rather than blank it.
+        """
+        if self.is_ollama:
+            message = parsed.get("message") or {}
+            content = (message.get("content") or "").strip()
+            reasoning = message.get("thinking") or previous_reasoning
+            # done_reason is this dialect's finish_reason, and carries the same
+            # "length" that says the window ran out mid-answer.
+            finish = parsed.get("done_reason") or previous_finish
+            counts = {"completion_tokens": parsed.get("eval_count"),
+                      "prompt_tokens": parsed.get("prompt_eval_count")}
+            usage = (counts if any(v is not None for v in counts.values())
+                     else (previous_usage or {}))
+            return content, reasoning, finish, usage
+        choices = parsed.get("choices") or []
+        message = (choices[0].get("message") or {}) if choices else {}
+        content = (message.get("content") or "").strip()
+        reasoning = message.get("reasoning_content") or previous_reasoning
+        finish = choices[0].get("finish_reason") if choices else previous_finish
+        usage = parsed.get("usage") or (previous_usage or {})
+        return content, reasoning, finish, usage
 
     @staticmethod
     def _starvation(model: str, reasoning: str, finish: str | None,
@@ -859,17 +1225,12 @@ class ModelRunner:
     def generate(self, model: str, prompt: str, *, images: list[Path] | None = None,
                  system: str | None = None, options: dict[str, Any] | None = None,
                  format_json: bool = False, think: bool | None = None) -> dict:
-        payload = self._payload(model, self._messages(prompt, system, images),
-                                options, format_json, stream=False, think=think)
-        raw = self._post("/chat/completions", payload)
+        payload = self._chat_body(model, prompt, system, images, options,
+                                  format_json, stream=False, think=think)
+        raw = self._post(self._chat_path, payload)
         parsed = self._parse_json(raw)
 
-        choices = parsed.get("choices") or []
-        message = (choices[0].get("message") or {}) if choices else {}
-        content = (message.get("content") or "").strip()
-        reasoning = message.get("reasoning_content") or ""
-        finish = choices[0].get("finish_reason") if choices else None
-        usage = parsed.get("usage") or {}
+        content, reasoning, finish, usage = self._reply_parts(parsed)
 
         if reasoning:
             log.info("%s reasoned before answering (%s completion tokens total)",
@@ -885,16 +1246,13 @@ class ModelRunner:
                     bigger["num_predict"] = min(limit * 4, 16384)
                     log.warning("%s starved its answer at %d tokens; retrying "
                                 "once at %d", model, limit, bigger["num_predict"])
-                    retry = self._payload(
-                        model, self._messages(prompt, system, images),
-                        bigger, format_json, stream=False, think=think)
-                    parsed = self._parse_json(self._post("/chat/completions", retry))
-                    choices = parsed.get("choices") or []
-                    message = (choices[0].get("message") or {}) if choices else {}
-                    content = (message.get("content") or "").strip()
-                    reasoning = message.get("reasoning_content") or reasoning
-                    finish = choices[0].get("finish_reason") if choices else finish
-                    usage = parsed.get("usage") or usage
+                    retry = self._chat_body(model, prompt, system, images,
+                                            bigger, format_json, stream=False,
+                                            think=think)
+                    parsed = self._parse_json(self._post(self._chat_path, retry))
+                    content, reasoning, finish, usage = self._reply_parts(
+                        parsed, previous_reasoning=reasoning,
+                        previous_finish=finish, previous_usage=usage)
                 if not content:
                     raise self._starvation(model, reasoning, finish, usage)
             else:
@@ -936,6 +1294,17 @@ class ModelRunner:
             # See _UnixHTTP: no SSE over the socket. One whole answer instead.
             yield self.generate(model, prompt, system=system,
                                 options=options)["response"]
+            return
+
+        if self.is_ollama:
+            # A separate reader rather than a branch inside this one: the two
+            # dialects frame their streams differently enough - SSE "data:"
+            # lines against newline-delimited JSON objects - that interleaving
+            # them would leave one path's rules quietly guarding the other's
+            # frames. What both readers share is the ending, which is where the
+            # errors that must not change live: _stream_end.
+            yield from self._stream_native(model, prompt, system=system,
+                                           options=options, think=think)
             return
 
         payload = self._payload(model, self._messages(prompt, system, None),
@@ -1005,7 +1374,7 @@ class ModelRunner:
                 # The caller already has real text; die loudly, not silently.
                 raise ModelRunnerError(
                     f"the stream broke mid-answer: {exc}") from exc
-            raise ModelRunnerError(BIND_HINT.format(url=self.url)) from exc
+            raise ModelRunnerError(self._bind_hint()) from exc
         finally:
             # _post hands the streaming caller both the response and the duty
             # of putting it down, token included: a closed response left
@@ -1014,12 +1383,107 @@ class ModelRunner:
                 token.release(response)
             response.close()
 
+        self._stream_end(model, emitted, finished, reasoned, finish, error_frame)
+
+    def _stream_native(self, model: str, prompt: str, *,
+                       system: str | None = None,
+                       options: dict[str, Any] | None = None,
+                       think: bool | None = None) -> Iterator[str]:
+        """The same stream, read the way Ollama sends it.
+
+        Native streaming is one JSON object per line - no "data:" prefix, no
+        [DONE] sentinel - and the answer arrives as message.content on each of
+        them. The last object carries "done": true and the done_reason that
+        stands in for finish_reason, which is what keeps the starvation check
+        working here rather than ending in silence.
+        """
+        payload = self._native_payload(
+            model, self._native_messages(prompt, system, None),
+            options, False, True, think)
+        # Captured before the request for the reason given on the other path: a
+        # generator runs on whichever thread pulls from it.
+        token = current_cancel_token()
+        response = self._post("/api/chat", payload, stream=True)
+        # Same reason as the SSE path: the body is UTF-8 and the server may not
+        # say so, and requests would then decode text/* as latin-1.
+        response.encoding = "utf-8"
+
+        emitted = ""              # actual answer text sent to the caller
+        reasoned = 0              # reasoning fragments observed
+        finish: str | None = None
+        finished = False          # saw "done" - anything less is a cut stream
+        error_frame: str | None = None
+
+        try:
+            for line in response.iter_lines(decode_unicode=True):
+                if token is not None and token.cancelled:
+                    raise Cancelled(_cancel_message(token))
+                if not line or not line.strip():
+                    continue
+                try:
+                    frame = json.loads(line)
+                except json.JSONDecodeError:
+                    # A half-written line is not something to guess at, and the
+                    # end-of-stream checks below will notice if the answer
+                    # never completed.
+                    continue
+                if not isinstance(frame, dict):
+                    continue
+                if frame.get("error"):
+                    # An error can arrive with a 200 status here too, and a
+                    # swallowed one would end the stream in silence.
+                    error = frame["error"]
+                    error_frame = str(error.get("message") or error
+                                      if isinstance(error, dict)
+                                      else error)[:300]
+                    break
+                message = frame.get("message") or {}
+                if message.get("thinking"):
+                    reasoned += 1
+                piece = message.get("content")
+                if piece:
+                    emitted += piece
+                    yield piece
+                if frame.get("done"):
+                    finished = True
+                    finish = frame.get("done_reason") or finish
+                    break
+        except (requests.exceptions.RequestException, OSError) as exc:
+            # Identical handling to the SSE path, and for the identical reason:
+            # an abandoned run must not be reported as a broken endpoint, and a
+            # break after real text must not be reported as silence.
+            if token is not None and token.cancelled:
+                raise Cancelled(_cancel_message(token)) from exc
+            if emitted.strip():
+                raise ModelRunnerError(
+                    f"the stream broke mid-answer: {exc}") from exc
+            raise ModelRunnerError(self._bind_hint()) from exc
+        finally:
+            if token is not None:
+                token.release(response)
+            response.close()
+
+        self._stream_end(model, emitted, finished, reasoned, finish, error_frame)
+
+    def _stream_end(self, model: str, emitted: str, finished: bool,
+                    reasoned: int, finish: str | None,
+                    error_frame: str | None) -> None:
+        """What a finished stream means, in one place for both readers.
+
+        Every outcome here is a failure the caller has to be able to tell
+        apart, so the wording and the exception types are shared rather than
+        written twice: only the two phrases that name a marker or a server the
+        other dialect does not have differ.
+        """
+        marker = "its done flag" if self.is_ollama else "its [DONE] marker"
+        advice = ("check that the Ollama server is still running"
+                  if self.is_ollama else "see 'docker model status'")
         if error_frame:
             raise ModelRunnerError(f"Model Runner reported an error mid-stream: {error_frame}")
         if emitted.strip():
             if not finished:
                 raise ModelRunnerError(
-                    "the stream ended without its [DONE] marker - the answer "
+                    f"the stream ended without {marker} - the answer "
                     "may be incomplete")
             return
         # Nothing usable was emitted. Name the reason; never end in silence.
@@ -1028,7 +1492,7 @@ class ModelRunner:
         if not finished:
             raise ModelRunnerError(
                 "the stream ended before any answer arrived (connection cut "
-                "or server stopped) - see 'docker model status'")
+                f"or server stopped) - {advice}")
         raise ModelRunnerError(
             f"{model} finished ({finish}) without producing any text")
 

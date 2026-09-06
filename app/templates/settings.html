@@ -11,7 +11,8 @@
 <p class="notice {% if not cfg.url.value or not cfg.model.value %}bad{% endif %}" id="in-force">
   <strong>In force: an external endpoint.</strong>
   {{ cfg.url.value or 'no address saved' }} serving
-  {{ cfg.model.value or 'no model name' }}.
+  {{ cfg.model.value or 'no model name' }}, spoken to as
+  {% if cfg.is_ollama_api %}an Ollama server, over its native API{% else %}an OpenAI-compatible server{% endif %}.
   {% if not cfg.url.value or not cfg.model.value %}
   Every text call fails until both an address and a model name are saved below.
   {% else %}
@@ -65,23 +66,25 @@
     endpoint is in force.</strong> That means document passages, the facts extracted
     from them, and the investigation's allegations are sent to whatever endpoint
     is configured here. Embeddings are never sent there: they always run against
-    the local model runner, whatever this page is set to. Transcription is not
-    sent there either: it needs a vision model, and it stays on the local runner.
+    the local model runner, whatever this page is set to. Transcription does not
+    follow this choice either way: it needs a vision model of its own, and where
+    that one runs is chosen separately under Reading images below.
   </p>
 
   <p class="note small" id="external-ignored" {% if cfg.is_external %}hidden{% endif %}>
-    These three are ignored while the prepackaged local model is in force.
-    Nothing here is deleted: choose the external endpoint again and they are
-    used as they stand.
+    Nothing in this block is used while the prepackaged local model is in
+    force. Nothing here is deleted either: choose the external endpoint again
+    and these settings are used as they stand.
   </p>
 
   <p class="note small">
-    The endpoint must speak the OpenAI dialect (<code>/chat/completions</code>,
-    <code>/models</code>), and the model name must be the name that endpoint
-    uses for it, which is rarely the name this machine uses.
+    The endpoint is spoken to in the OpenAI dialect
+    (<code>/chat/completions</code>, <code>/models</code>) unless it is ticked
+    as an Ollama server below, and the model name must be the name that
+    endpoint uses for it, which is rarely the name this machine uses.
   </p>
 
-  <label class="small" for="url">Endpoint URL &mdash; OpenAI-compatible base, e.g. https://host:8000/v1</label>
+  <label class="small" for="url">Endpoint URL &mdash; the base address, e.g. https://host:8000/v1 or http://host:11434</label>
   <input id="url" type="text" spellcheck="false" autocomplete="off"
          {% if not cfg.is_external %}disabled{% endif %}
          style="width: 100%; max-width: 640px; display: block; margin: 4px 0 4px"
@@ -89,6 +92,28 @@
          value="{{ cfg.stored_url }}">
   <p class="small" id="url-live" {% if not cfg.is_external %}hidden{% endif %}>In use: {{ cfg.url.value or 'not set' }} &mdash;
     <span class="tag">{{ cfg.url.source }}</span></p>
+
+  {# The tickbox belongs to the address directly above it: it says how that
+     address is spoken to, and it means nothing at all while the prepackaged
+     local runner is in force, so it lives inside this block and is disabled
+     with the rest of it. It renders the saved dialect rather than the one in
+     force, exactly as the boxes above render the saved address: under the
+     local model the resolver reports the OpenAI dialect whatever is stored,
+     and a box that unticked itself on a change of mode would read as the
+     choice having been thrown away. #}
+  <p class="row" style="margin: 12px 0 0">
+    <label><input type="checkbox" id="ollama"
+                  {% if not cfg.is_external %}disabled{% endif %}
+                  {% if cfg.stored_api_flavor == 'ollama' %}checked{% endif %}>
+      <strong>This is an Ollama server</strong></label>
+  </p>
+  <p class="small" style="margin: 2px 0 12px 22px">
+    On its OpenAI-compatible route an Ollama server silently ignores the
+    context-size option, so a long document overruns the window the server
+    picked for itself and the replies come back empty; ticked, the calls go to
+    Ollama's native API, which honours it. The same address serves both &mdash;
+    a base ending in <code>/v1</code> is understood either way.
+  </p>
 
   <label class="small" for="model">Text model name</label>
   <input id="model" type="text" spellcheck="false" autocomplete="off"
@@ -122,14 +147,123 @@
 <p class="small">
   Testing asks the saved endpoint what it offers &mdash; or the local runner
   when no endpoint is saved &mdash; whichever mode is in force, so an address
-  can be checked before it is switched on. It tests what is saved and not what
-  is typed, so save before testing a change, and read the address in the
-  result to see which endpoint answered. Clearing removes the endpoint, model
-  name and key from the settings table and returns to the prepackaged local
-  model.
+  can be checked before it is switched on. It asks for the model list in the
+  saved dialect, and the result names both the address and the dialect that
+  answered, so a green line cannot be read as a test of the other one. It
+  tests what is saved and not what is typed, so save before testing a change.
+  Clearing removes the endpoint, model name, key and Ollama tick from the
+  settings table and returns to the prepackaged local model. It leaves the
+  vision settings below alone &mdash; but a vision model pointed at the endpoint
+  being cleared has nowhere left to run, so move it back to the local runner.
 </p>
 
 <div id="test-out"></div>
+
+<h1 style="margin-top: 36px">Reading images</h1>
+
+{# Vision is a different model, and it may live somewhere different, so it gets
+   its own banner rather than a clause in the text model's. An operator who
+   pointed the text model at their own server and read "in force: an external
+   endpoint" had every reason to believe transcription had moved with it. It had
+   not, and the error that eventually surfaced named an environment variable
+   they had never set. #}
+{% if not cfg.vision_model.value %}
+<p class="notice" id="vision-in-force">
+  <strong>In force: nothing will read images.</strong>
+  No vision model is set, so a scanned or photographed page cannot be
+  transcribed and is left unread.
+</p>
+{% elif cfg.is_vision_external %}
+<p class="notice {% if not cfg.stored_url %}bad{% endif %}" id="vision-in-force">
+  <strong>In force: an external endpoint reads images.</strong>
+  {{ cfg.vision_model.value }} at {{ cfg.stored_url or 'no address saved' }}.
+  {% if cfg.stored_url %}
+  Page images are sent there.
+  {% else %}
+  Every page image fails until an endpoint address is saved under Text model
+  above, because that is the address this choice points at.
+  {% endif %}
+</p>
+{% else %}
+<p class="notice ok" id="vision-in-force">
+  <strong>In force: the built-in local runner reads images.</strong>
+  {{ cfg.vision_model.value }} &mdash;
+  <span class="tag">{{ cfg.vision_model.source }}</span>.
+  Page images stay on this machine.
+</p>
+{% endif %}
+
+{# Worth a line of its own, because the alternative is an operator configuring
+   a model they will never call. A vision model is reached only from the
+   transcription pass, and that pass is reached only by a page OCR could not
+   read. #}
+<p class="small">
+  A vision model is used for one thing: reading a page that could not be read
+  any other way &mdash; a scan or a photograph. A PDF whose text extracts
+  directly never reaches this stage, so if every document loaded here carries
+  its own text there is nothing to set below.
+</p>
+
+<h2>Which model reads images</h2>
+
+<p class="row">
+  <label><input type="radio" name="vision_mode" value="local" id="vision-local"
+                {% if not cfg.is_vision_external %}checked{% endif %}>
+    <strong>The built-in local runner</strong></label>
+</p>
+<p class="small" style="margin: 0 0 12px 22px">
+  Page images are read on this machine and nothing about them leaves it. This
+  is what the pipeline did before this setting existed, and it is the safe
+  answer for case material.
+</p>
+
+<p class="row">
+  <label><input type="radio" name="vision_mode" value="external" id="vision-external"
+                {% if cfg.is_vision_external %}checked{% endif %}>
+    <strong>The same external endpoint as the text model</strong></label>
+</p>
+<p class="small" style="margin: 0 0 12px 22px">
+  The address, key and dialect saved under Text model above. There is no second
+  address here on purpose: one endpoint serving both models is the arrangement
+  this page can describe honestly, and a third address would have to carry its
+  own key and its own dialect to mean anything.
+</p>
+
+<p class="warn" id="vision-warning" {% if not cfg.is_vision_external %}hidden{% endif %}>
+  <strong>Page images leave this machine while the external endpoint reads
+  them.</strong> A page image is the rawest case material there is: the whole
+  page as it was scanned or photographed &mdash; letterhead, signatures,
+  handwriting in the margin &mdash; and not the passage an extraction pass would
+  have quoted from it. It is sent to whatever endpoint is configured above.
+</p>
+
+{# The name box is usable in both modes, unlike the text model's, because the
+   local runner needs a vision model named too - there is no prepackaged one
+   this page could fall back to. #}
+<label class="small" for="vision-model">Vision model name &mdash; the name the chosen endpoint gives it</label>
+<input id="vision-model" type="text" spellcheck="false" autocomplete="off"
+       style="width: 100%; max-width: 640px; display: block; margin: 4px 0 4px"
+       placeholder="the name that endpoint gives the vision model"
+       value="{{ cfg.stored_vision_model }}">
+<p class="small" id="vision-model-live">In use: {{ cfg.vision_model.value or 'not set' }} &mdash;
+  <span class="tag">{{ cfg.vision_model.source }}</span></p>
+
+<p class="row">
+  <button id="vision-save" class="btn">Save</button>
+  <button id="vision-check" class="btn">Check the saved vision model</button>
+  <span id="vision-status" class="small"></span>
+</p>
+<p class="small">
+  The check asks the endpoint what the model can do. An Ollama server answers
+  that question directly, so a vision model can be confirmed as one and a
+  text-only model can be caught here rather than after it has transcribed a page
+  image into confident nonsense. An OpenAI-compatible endpoint offers no way to
+  ask, so the answer there is that it could not be determined &mdash; which is
+  not a yes and is not shown as one. Like the test above, the check measures
+  what is saved and not what is typed, so save before checking a change.
+</p>
+
+<div id="vision-out"></div>
 {% endblock %}
 
 {% block scripts %}
@@ -137,6 +271,7 @@
 const urlBox = document.getElementById('url');
 const modelBox = document.getElementById('model');
 const keyBox = document.getElementById('key');
+const ollamaBox = document.getElementById('ollama');
 const statusEl = document.getElementById('status');
 const testOut = document.getElementById('test-out');
 const externalRadio = document.getElementById('mode-external');
@@ -150,9 +285,17 @@ const liveLines = ['url-live', 'model-live'].map(id => document.getElementById(i
 // loud, because the operator this page is for had believed a half-made change
 // was live.
 const savedMode = '{{ cfg.mode }}';
+// The saved dialect, for the same comparison. It is the stored value rather
+// than the one in force, because that is what the tickbox above renders and
+// the two differ under the local model.
+const savedFlavor = '{{ cfg.stored_api_flavor }}';
 
 function chosenMode() {
   return externalRadio.checked ? 'external' : 'local';
+}
+
+function chosenFlavor() {
+  return ollamaBox.checked ? 'ollama' : 'openai';
 }
 
 // The endpoint fields follow the choice: usable and explained under the
@@ -160,18 +303,23 @@ function chosenMode() {
 // Disabling never clears them, so flipping between the two costs nothing.
 function applyMode() {
   const external = chosenMode() === 'external';
-  for (const box of [urlBox, modelBox, keyBox]) box.disabled = !external;
+  for (const box of [urlBox, modelBox, keyBox, ollamaBox]) box.disabled = !external;
   externalBlock.style.opacity = external ? '' : '.55';
   warningEl.hidden = !external;
   ignoredEl.hidden = external;
   for (const line of liveLines) line.hidden = !external;
-  statusEl.textContent = chosenMode() === savedMode
+  // A ticked box counts as an unsaved change only under the external endpoint.
+  // Under the local model it is disabled and is not posted, so a tick left
+  // over from an earlier endpoint is not a change waiting to be saved.
+  const flavorChanged = external && chosenFlavor() !== savedFlavor;
+  statusEl.textContent = (chosenMode() === savedMode && !flavorChanged)
     ? '' : 'not saved yet — press Save';
 }
 
 for (const id of ['mode-local', 'mode-external']) {
   document.getElementById(id).addEventListener('change', applyMode);
 }
+ollamaBox.addEventListener('change', applyMode);
 
 function result(text, kind) {
   testOut.innerHTML = '';
@@ -196,11 +344,15 @@ async function post(path, body) {
 // form would announce an endpoint the server may have stored differently -
 // which is the confusion this page exists to end. The note survives the reload
 // in session storage so the operator still sees that the save landed.
-async function save(payload, note) {
+// noteKey says which of the two status lines the note comes back to after the
+// reload. Both sections save through here, and a note about the vision model
+// landing on the text model's line would read as a statement about the text
+// model.
+async function save(payload, note, noteKey) {
   statusEl.textContent = 'saving…';
   try {
     await post('/api/settings', payload);
-    sessionStorage.setItem('settings-note', note);
+    sessionStorage.setItem(noteKey || 'settings-note', note);
     location.reload();
   } catch (err) {
     statusEl.textContent = 'not saved: ' + err.message;
@@ -217,20 +369,30 @@ document.getElementById('save').addEventListener('click', () => {
   if (mode === 'external') {
     payload.url = urlBox.value.trim();
     payload.model = modelBox.value.trim();
+    // Both states of a tickbox are meaningful, so it is posted on every save
+    // of this choice rather than only when ticked - otherwise unticking it
+    // would look like a change and leave the native dialect in force.
+    payload.api_flavor = chosenFlavor();
     // An empty key box means "leave the stored key alone", not "clear it" -
     // otherwise every save of an unrelated field would wipe the key, because
     // the box is never repopulated with the secret.
     if (keyBox.value) payload.api_key = keyBox.value;
   }
   save(payload, mode === 'external'
-       ? 'saved — the external endpoint is in force'
+       ? (chosenFlavor() === 'ollama'
+          ? "saved — the external endpoint is in force, over Ollama's native API"
+          : 'saved — the external endpoint is in force, over the OpenAI dialect')
        : 'saved — the prepackaged local model is in force');
 });
 
 document.getElementById('clear').addEventListener('click', () => {
-  if (!confirm('Clear the endpoint, model name and API key from settings?\n\n' +
+  if (!confirm('Clear the endpoint, model name, API key and Ollama tick ' +
+               'from settings?\n\n' +
                'The text model returns to the prepackaged local model.')) return;
-  save({ mode: 'local', url: '', model: '', api_key: '' },
+  // The dialect is cleared with the address it described. Leaving it ticked
+  // would hand the next endpoint typed here a native-API setting chosen for a
+  // server that is gone.
+  save({ mode: 'local', url: '', model: '', api_key: '', api_flavor: 'openai' },
        'cleared — the prepackaged local model is in force');
 });
 
@@ -240,14 +402,22 @@ document.getElementById('test').addEventListener('click', async () => {
   result('testing…');
   try {
     const data = await post('/api/settings/test', {});
+    // Every outcome names the dialect it was measured over. The two ask
+    // different servers for the same list - /models against an OpenAI-style
+    // endpoint, /api/tags against Ollama's native one - so a green line that
+    // did not say which one answered would read as proof of whichever the
+    // operator had in mind.
+    const dialect = data.api_flavor === 'ollama'
+      ? "Ollama's native API" : 'the OpenAI-compatible API';
     if (data.ok) {
       const models = (data.models || []);
       const offered = models.length
         ? `offers ${models.length} model(s): ${models.join(', ')}`
         : 'offered no model list';
-      result(`${data.url} reachable — ${offered}`, 'ok');
+      result(`${data.url} reachable over ${dialect} — ${offered}`, 'ok');
     } else {
-      result(data.message || `${data.url} failed`, 'bad');
+      result(`${data.message || `${data.url} failed`} — tested over ${dialect}`,
+             'bad');
     }
   } catch (err) {
     result('test failed: ' + err.message, 'bad');
@@ -256,11 +426,111 @@ document.getElementById('test').addEventListener('click', async () => {
   }
 });
 
+
+// --- reading images -------------------------------------------------------
+//
+// This section saves itself. One Save covering both would make an operator who
+// came here to change the text endpoint post the vision fields as well, and the
+// route's rule is that a field it was not sent is left exactly as it stands -
+// which is precisely the protection that would be given away.
+const visionModelBox = document.getElementById('vision-model');
+const visionStatusEl = document.getElementById('vision-status');
+const visionOut = document.getElementById('vision-out');
+const visionExternalRadio = document.getElementById('vision-external');
+const visionWarningEl = document.getElementById('vision-warning');
+
+const savedVisionMode = '{{ cfg.vision_mode }}';
+// Quoted through tojson rather than pasted between apostrophes. A model name is
+// whatever the operator typed, and a character the template escapes for HTML
+// would arrive here as an entity and never compare equal to what is in the box,
+// leaving the status line permanently claiming an unsaved change.
+const savedVisionModel = {{ cfg.stored_vision_model | tojson }};
+
+function chosenVisionMode() {
+  return visionExternalRadio.checked ? 'external' : 'local';
+}
+
+// The typed name counts as an unsaved change here, where it does not in the
+// section above. The check button measures the saved name, so typing one name
+// and then reading a green line about another is the mistake this section can
+// produce on its own, and this line is what stops it.
+function applyVisionMode() {
+  const external = chosenVisionMode() === 'external';
+  visionWarningEl.hidden = !external;
+  const changed = chosenVisionMode() !== savedVisionMode
+    || visionModelBox.value.trim() !== savedVisionModel.trim();
+  visionStatusEl.textContent = changed ? 'not saved yet — press Save' : '';
+}
+
+for (const id of ['vision-local', 'vision-external']) {
+  document.getElementById(id).addEventListener('change', applyVisionMode);
+}
+visionModelBox.addEventListener('input', applyVisionMode);
+
+function visionResult(text, kind) {
+  visionOut.innerHTML = '';
+  const p = document.createElement('p');
+  p.className = 'notice ' + (kind || '');
+  p.textContent = text;
+  visionOut.appendChild(p);
+}
+
+document.getElementById('vision-save').addEventListener('click', () => {
+  const mode = chosenVisionMode();
+  const name = visionModelBox.value.trim();
+  // Only the two vision fields are posted. The text endpoint, its key and its
+  // dialect are not this button's business, and the route leaves alone what it
+  // was not sent.
+  save({ vision_mode: mode, vision_model: name },
+       name
+         ? (mode === 'external'
+            ? `saved — ${name} reads images on the external endpoint`
+            : `saved — ${name} reads images on the local runner`)
+         : 'saved — no vision model is set, so nothing will read images',
+       'vision-note');
+});
+
+document.getElementById('vision-check').addEventListener('click', async () => {
+  const button = document.getElementById('vision-check');
+  button.disabled = true;
+  visionResult('checking…');
+  try {
+    const data = await post('/api/settings/vision/test', {});
+    // Three outcomes, never two. An endpoint that cannot be asked what a model
+    // can do is rendered without the ok class and says in words that nothing
+    // was confirmed, because the failure being guarded against here is a
+    // text-only model transcribing a page image into confident nonsense that
+    // then becomes evidence. A "could not be determined" shown in green would
+    // be read as a yes.
+    if (data.vision === 'yes') {
+      visionResult(data.message, 'ok');
+    } else if (data.vision === 'no') {
+      visionResult(data.message, 'bad');
+    } else {
+      visionResult(data.message, data.ok ? '' : 'bad');
+    }
+  } catch (err) {
+    visionResult('check failed: ' + err.message, 'bad');
+  } finally {
+    button.disabled = false;
+  }
+});
+
+applyMode();
+applyVisionMode();
+
+// After applyMode(), never before: applyMode() writes the status line itself,
+// and restoring the note first left it overwritten with an empty string on
+// every reload after a save - the one moment this line has something to say.
 const note = sessionStorage.getItem('settings-note');
 if (note) {
   sessionStorage.removeItem('settings-note');
   statusEl.textContent = note;
 }
-applyMode();
+const visionNote = sessionStorage.getItem('vision-note');
+if (visionNote) {
+  sessionStorage.removeItem('vision-note');
+  visionStatusEl.textContent = visionNote;
+}
 </script>
 {% endblock %}

@@ -29,6 +29,102 @@ Documents will still be read and transcribed.</p>
 </table>
 
 <p class="empty" id="empty" hidden>Nothing uploaded yet.</p>
+
+{# --- destroying case data -------------------------------------------------
+
+   The purge lives at the bottom of the page, behind its own rule and its own
+   heading, because everything above it is an ordinary action on one document
+   and this is not: it ends the case. It is deliberately not a button beside
+   the per-document Delete, and deliberately not reachable by a stray click -
+   the operator has to choose a scope and type the phrase before it will run
+   at all. The wording names the original uploaded files out loud. An operator
+   who believes the originals survive a purge is wrong in a way they only find
+   out later, when the file they meant to keep is not anywhere. #}
+<section id="purge-zone"
+         style="margin-top: 46px; padding: 16px 18px; border: 1px solid var(--danger);
+                border-radius: 8px; background: var(--panel)">
+  <h2 style="margin-top: 0">Destroy case data</h2>
+
+  <p class="warn">
+    <strong>This cannot be undone.</strong> There is no archive, no undo and no
+    recycle bin: what this destroys is gone from this machine. <strong>The
+    original uploaded files are deleted too</strong> &mdash; this is not a
+    "clear the database and re-ingest" button. If the only copy of a document
+    is the one uploaded here, that copy is destroyed with it. Download anything
+    that has to survive the case &mdash; the transcripts link above, and each
+    report from the report page &mdash; before you run this.
+  </p>
+
+  <p class="small">
+    A document being processed right now is stopped rather than left running,
+    so nothing it was part-way through writing comes back after the purge.
+    Nothing here touches the model endpoint, the API key or the investigation
+    objective: those are configuration, not case material, and they survive
+    every scope below.
+  </p>
+
+  <h3>What to destroy</h3>
+
+  <p class="row">
+    <label><input type="radio" name="purge-scope" value="documents" checked>
+      <strong>Documents only</strong></label>
+  </p>
+  <p class="small" style="margin: 0 0 12px 22px">
+    Destroys every uploaded document: the original files, the rendered page
+    images, the read text, the facts extracted from them, the entities derived
+    from those facts, the passages the chat page searches, and everything about
+    them in the graph.
+    <em>Leaves</em> the saved reports, the objective and the model settings.
+    Reports already written stay readable, but the documents they cite are gone,
+    so nothing in them can be checked against the record again.
+  </p>
+
+  <p class="row">
+    <label><input type="radio" name="purge-scope" value="reports">
+      <strong>Reports only</strong></label>
+  </p>
+  <p class="small" style="margin: 0 0 12px 22px">
+    Destroys every saved report. <em>Leaves</em> every document, its text, its
+    facts, the graph, the objective and the model settings, so a report can be
+    written again from the same corpus &mdash; though not identically, because
+    each run samples with its own seed.
+  </p>
+
+  <p class="row">
+    <label><input type="radio" name="purge-scope" value="all">
+      <strong>Documents and reports &mdash; the whole case</strong></label>
+  </p>
+  <p class="small" style="margin: 0 0 12px 22px">
+    Both of the above in one action: no documents, no originals, no pages, no
+    text, no facts, no entities, no graph, no reports.
+    <em>Leaves</em> only the objective and the model settings, so the
+    application is ready for the next case rather than needing to be set up
+    again. This is the state a case is left in at closure, once the products
+    have been transferred.
+  </p>
+
+  <h3>Confirm</h3>
+  <p class="small">
+    Type the phrase shown below to unlock the button. It is typed
+    rather than clicked so that this cannot happen by accident, and it is checked
+    again by the server, so a request that does not carry it is refused there too.
+  </p>
+  <label class="small" for="purge-confirm">Type <code id="purge-phrase">…</code> to confirm</label>
+  <input id="purge-confirm" type="text" spellcheck="false" autocomplete="off"
+         autocapitalize="off" autocorrect="off"
+         style="display: block; width: 100%; max-width: 320px; margin: 4px 0 10px"
+         placeholder="">
+
+  <p class="row">
+    <button id="purge" class="btn danger" disabled>Destroy the selected data</button>
+    <span id="purge-status" class="small"></span>
+  </p>
+
+  {# The counts the endpoint returns are printed here and left on the page.
+     A destructive action that says nothing when it finishes is indistinguishable
+     from one that did nothing, and the operator has no second chance to look. #}
+  <div id="purge-out"></div>
+</section>
 {% endblock %}
 
 {% block scripts %}
@@ -155,5 +251,150 @@ async function tick() {
   setTimeout(tick, busy ? 1500 : 6000);
 }
 tick();
+
+// --- destroying case data --------------------------------------------------
+// The route, the field names and the phrase are named once, here, because the
+// page has to ask for exactly what the endpoint checks. If the phrase the page
+// asks for and the phrase the endpoint requires ever drift apart, the request
+// is refused on arrival and the server's own message is printed below - which
+// is the failure worth having, rather than a page that accepts a phrase the
+// server does not and looks like it worked.
+const PURGE_PATH = '/api/purge';
+// The phrases live on the server and differ per scope. Fetching them keeps
+// one definition: a page carrying its own copy unlocked the button on a word
+// the purge then refused.
+let PURGE_PHRASES = {};
+function purgePhrase() {
+  const el = document.querySelector('input[name="purge-scope"]:checked');
+  return PURGE_PHRASES[el ? el.value : 'documents'] || '';
+}
+fetch(PURGE_PATH).then(r => r.json()).then(d => {
+  PURGE_PHRASES = d.phrases || {};
+  const shown = document.getElementById('purge-phrase');
+  if (shown) shown.textContent = purgePhrase();
+  const box = document.getElementById('purge-confirm');
+  if (box) box.placeholder = purgePhrase();
+}).catch(() => {});
+
+const purgeBtn = document.getElementById('purge');
+const purgeBox = document.getElementById('purge-confirm');
+const purgeStatus = document.getElementById('purge-status');
+const purgeOut = document.getElementById('purge-out');
+
+const PURGE_LABEL = {
+  documents: 'every document, including the original uploaded files',
+  reports: 'every saved report',
+  all: 'every document, every original uploaded file, and every saved report',
+};
+
+function purgeScope() {
+  return document.querySelector('input[name="purge-scope"]:checked').value;
+}
+
+// The button stays inert until the phrase matches exactly. Whitespace around it
+// is trimmed because a paste carries it; nothing else is forgiven, so a
+// near-miss stays locked rather than passing as close enough.
+function armPurge() {
+  purgeBtn.disabled = !purgePhrase() || purgeBox.value.trim() !== purgePhrase();
+}
+
+function purgeList(entries) {
+  const ul = document.createElement('ul');
+  ul.className = 'small';
+  ul.style.margin = '4px 0 10px';
+  for (const [label, value] of entries) {
+    const li = document.createElement('li');
+    li.textContent = value === undefined
+      ? label
+      : `${label}: ${value === null || value === '' ? 'none' : value}`;
+    ul.appendChild(li);
+  }
+  return ul;
+}
+
+// What the endpoint reports is printed as it comes back rather than against a
+// fixed list of tables this page believes exist. A count the endpoint starts
+// reporting appears here without this page being changed, and - the reason that
+// matters more - a count it stops reporting cannot be invented here.
+function purgeReport(data) {
+  purgeOut.replaceChildren();
+  const head = document.createElement('p');
+  head.className = 'notice ok';
+  head.textContent = 'Destroyed. None of it can be recovered.';
+  purgeOut.appendChild(head);
+
+  const flat = [];
+  const groups = [];
+  for (const [key, value] of Object.entries(data || {})) {
+    if (key === 'scope') continue;
+    if (Array.isArray(value)) groups.push([key, value.map(v => [String(v), undefined])]);
+    else if (value && typeof value === 'object') groups.push([key, Object.entries(value)]);
+    else flat.push([key, value]);
+  }
+  if (flat.length) purgeOut.appendChild(purgeList(flat));
+  for (const [key, entries] of groups) {
+    const heading = document.createElement('h3');
+    heading.textContent = key;
+    purgeOut.appendChild(heading);
+    purgeOut.appendChild(entries.length
+      ? purgeList(entries)
+      : Object.assign(document.createElement('p'),
+                      { className: 'small', textContent: 'none' }));
+  }
+  if (!flat.length && !groups.length) {
+    const p = document.createElement('p');
+    p.className = 'small';
+    p.textContent = 'The endpoint returned no counts, so what it destroyed ' +
+                    'cannot be shown here.';
+    purgeOut.appendChild(p);
+  }
+}
+
+purgeBox.addEventListener('input', armPurge);
+
+purgeBtn.addEventListener('click', async () => {
+  // Checked again on the way out as well as on every keystroke: the button can
+  // be reached by keyboard, and this is the one action on the page that must
+  // never run from a state the operator has since typed their way out of.
+  if (purgeBox.value.trim() !== purgePhrase()) return;
+  const scope = purgeScope();
+  if (!confirm(`Destroy ${PURGE_LABEL[scope]}?\n\n` +
+               'This cannot be undone. The original uploaded files go too, so ' +
+               'anything that has not already been downloaded is gone.')) return;
+
+  purgeBtn.disabled = true;
+  purgeStatus.textContent = 'destroying…';
+  purgeOut.replaceChildren();
+  try {
+    const res = await fetch(PURGE_PATH, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope: scope, confirm: purgePhrase() }),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) throw new Error((data && data.detail) || `HTTP ${res.status}`);
+    purgeReport(data);
+  } catch (err) {
+    // The failure is not reported as "nothing was destroyed", because a request
+    // that fails on the way back may already have destroyed what it was asked
+    // to. The operator is told to read the list rather than told a state of the
+    // world this page cannot know.
+    purgeOut.replaceChildren();
+    const p = document.createElement('p');
+    p.className = 'notice bad';
+    p.textContent = 'The purge did not report a result: ' + err.message +
+                    ' — check the document list above before running it again, ' +
+                    'because part of it may already have been destroyed.';
+    purgeOut.appendChild(p);
+  } finally {
+    purgeStatus.textContent = '';
+    // The phrase is cleared whatever happened, so the control is never left
+    // armed behind a finished purge and a second one has to be typed for.
+    purgeBox.value = '';
+    armPurge();
+    refresh();
+  }
+});
+
+armPurge();
 </script>
 {% endblock %}

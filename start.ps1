@@ -330,6 +330,26 @@ if ($freeGB -lt 0) {
     Ok "${freeGB}GB free disk"
 }
 
+# --- take any push first ---------------------------------------------------------------
+# A start should be a start on the current version. The watcher keeps a running
+# deployment current afterwards, but it cannot help the first start of the day:
+# without this, a machine that has been off for a week builds week-old code and
+# looks perfectly healthy doing it.
+if ((Test-Path '.git') -and (Get-Command git -ErrorAction SilentlyContinue)) {
+    git remote get-url origin *> $null
+    if ($LASTEXITCODE -eq 0) {
+        Step 'Fetching the latest version'
+        git pull -q --ff-only origin main 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host '    up to date with origin/main'
+        } else {
+            # A local change, no network, or a diverged branch all land here,
+            # and none is a reason to refuse to start what is already on disk.
+            Write-Host '    could not fast-forward; starting the version on disk' -ForegroundColor Yellow
+        }
+    }
+}
+
 # --- build and start -------------------------------------------------------------------
 Step 'Building images (first run takes a few minutes)'
 Compose build

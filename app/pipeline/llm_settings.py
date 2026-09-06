@@ -30,6 +30,18 @@ before it: the environment first, then the built-in local default. A
 misconfigured override, by contrast, must fail loudly. An operator who believes
 case text is going to a remote model, and is quietly still running locally, is
 worse off than an operator looking at an error.
+
+The vision model - the one that reads a scan or a photograph - is settled here
+too, and separately. It is a different model and may live somewhere else
+entirely: an operator who moves the text model to their own server usually has
+not moved anything else, and the first thing they saw when they tried was a
+transcription failure naming VLM_MODEL, an environment variable they had never
+set. So vision has its own model name and its own choice of where it runs, and
+that choice defaults to the local runner, which is what transcription has
+always used. Where the endpoint can be asked - Ollama's native API answers
+/api/show with a capability list - the choice is verified rather than believed,
+because a text-only model handed a page image does not fail: it writes a
+plausible page that then becomes evidence.
 """
 from __future__ import annotations
 
@@ -38,7 +50,8 @@ from urllib.parse import urlsplit
 
 from . import state
 from .config import env_str
-from .model_client import DEFAULT_URL, ModelRunner, ModelRunnerError, same_model
+from .model_client import (DEFAULT_URL, FLAVOR_OLLAMA, FLAVOR_OPENAI,
+                           ModelRunner, ModelRunnerError, same_model)
 
 # The setting keys, named once. The web layer imports these rather than
 # spelling the strings again, because a typo in a key name reads as "no
@@ -47,6 +60,12 @@ SETTING_BASE_URL = "llm_base_url"
 SETTING_MODEL = "llm_model"
 SETTING_API_KEY = "llm_api_key"
 SETTING_MODE = "llm_mode"
+SETTING_API_FLAVOR = "llm_api_flavor"
+# Vision has its own two keys for the same reason it has its own section
+# below: it is a separate model, and the operator may want it in a separate
+# place. The scope names where it runs; the model names which one to ask.
+SETTING_VISION_MODEL = "llm_vision_model"
+SETTING_VISION_SCOPE = "llm_vision_scope"
 
 # The two modes, named once for the same reason as the keys. Local is the
 # behaviour that existed before the settings page, and it is what an unset or
@@ -55,6 +74,30 @@ SETTING_MODE = "llm_mode"
 MODE_LOCAL = "local"
 MODE_EXTERNAL = "external"
 MODES = (MODE_LOCAL, MODE_EXTERNAL)
+
+# Where the vision model runs. The same two words as the text mode, and
+# deliberately the same two values, because an operator reading the page
+# should not have to learn that "external" means one thing in one row and
+# something else in the next. They are separate names rather than a reuse of
+# MODE_* so that a future third text mode cannot silently become a third place
+# to run vision. Local is the default and is today's behaviour exactly.
+VISION_LOCAL = MODE_LOCAL
+VISION_EXTERNAL = MODE_EXTERNAL
+VISION_SCOPES = (VISION_LOCAL, VISION_EXTERNAL)
+
+# Which dialect the external endpoint speaks. The names come from the model
+# client, which is where the two request shapes are actually built, so there is
+# one spelling of each word in the codebase rather than two that can drift.
+#
+# This exists because Ollama serves both. Its OpenAI-compatible /v1 endpoint
+# accepts a request and then silently discards the options it has no field for
+# - num_ctx among them - so a 6000-character chunk met a 4k default context,
+# the model filled the window deliberating, and every call came back with
+# finish_reason "length" and no content. Its native /api/chat takes those same
+# options in an "options" object and honours them. The operator knows which
+# kind of server they typed the address of; nothing here can reliably tell from
+# the address alone, so it is asked rather than guessed.
+FLAVORS = (FLAVOR_OPENAI, FLAVOR_OLLAMA)
 
 # Limits exist to keep a paste accident out of the database and out of an HTTP
 # header; they are not security boundaries.
@@ -185,6 +228,60 @@ def set_mode(value: str) -> None:
             f"the model mode must be {MODE_LOCAL!r} or {MODE_EXTERNAL!r} "
             f"(got {value!r})")
     state.set_setting(SETTING_MODE, chosen)
+
+
+def stored_api_flavor() -> str:
+    """The saved dialect whether or not the mode has it in force.
+
+    The settings page needs this for the same reason it needs stored_base_url:
+    the tickbox must show what would be used if the operator switched to
+    external, or switching to local and back would look like the choice was
+    thrown away.
+
+    An unset or unrecognised value reads as the OpenAI dialect. That is the
+    behaviour that existed before this setting, so a database written by an
+    older build behaves exactly as it did, and a word nothing here recognises
+    cannot quietly change the shape of every request.
+    """
+    return FLAVOR_OLLAMA if _setting(SETTING_API_FLAVOR) == FLAVOR_OLLAMA else FLAVOR_OPENAI
+
+
+def api_flavor() -> str:
+    """The dialect in force for the text model: "openai" or "ollama".
+
+    The flavour belongs to the operator's own endpoint. Local mode is the
+    built-in Model Runner, which speaks the OpenAI dialect and nothing else, so
+    a tick left in the box from an earlier external configuration must not
+    follow the operator back to the local model - it would send /api/chat to a
+    server that has no such route and turn a working local pipeline into a run
+    of 404s.
+    """
+    return stored_api_flavor() if is_external() else FLAVOR_OPENAI
+
+
+def is_ollama_api() -> bool:
+    """True when text calls should use Ollama's native API."""
+    return api_flavor() == FLAVOR_OLLAMA
+
+
+def set_api_flavor(value: str) -> None:
+    """Store the dialect. This is the only writer, and it validates its input.
+
+    Like set_mode, and for the same reason: a value the reader would not
+    recognise is refused here rather than stored, because stored_api_flavor()
+    reads anything unrecognised as the OpenAI dialect and the operator would be
+    looking at an unticked box they had just ticked.
+
+    It also has set_mode's shape rather than save_config's, because a tickbox
+    has no empty-means-unchanged rule: it is posted on every save and its two
+    states are both meaningful.
+    """
+    chosen = _clean(value).lower()
+    if chosen not in FLAVORS:
+        raise SettingsError(
+            f"the API flavour must be {FLAVOR_OPENAI!r} or {FLAVOR_OLLAMA!r} "
+            f"(got {value!r})")
+    state.set_setting(SETTING_API_FLAVOR, chosen)
 
 
 def _local_base_url() -> Resolved:
@@ -434,7 +531,8 @@ def save(base_url_value: str, model_value: str, *,
 # connectivity
 # --------------------------------------------------------------------------
 def check_connection(base_url_value: str = "", model_value: str = "",
-                     api_key_value: str | None = None) -> CheckResult:
+                     api_key_value: str | None = None,
+                     flavor_value: str | None = None) -> CheckResult:
     """Ask an endpoint for its model list and report what happened.
 
     Called with no arguments this tests the saved override. Called with the
@@ -449,6 +547,12 @@ def check_connection(base_url_value: str = "", model_value: str = "",
     back to what is in force. In local mode those differ, and the in-force
     answer would be the local model's name - which is precisely the pairing
     that made the endpoint setting look configured while it was not.
+
+    flavor_value follows the same sentinel rule as the key: None means "use the
+    saved tickbox". It has to be here at all because the two dialects list
+    their models at different addresses - /v1/models against an OpenAI-style
+    server, /api/tags against Ollama's native API - so a test run in the wrong
+    dialect answers 404 against a server that is working perfectly.
     """
     url = (_clean(base_url_value) or stored_base_url()
            or _local_base_url().value)
@@ -460,11 +564,20 @@ def check_connection(base_url_value: str = "", model_value: str = "",
     want = (_clean(model_value) or stored_text_model()
             or _clean(env_str("TEXT_MODEL", "")))
     key = _api_key() if api_key_value is None else _clean(api_key_value)
+    flavor = (stored_api_flavor() if flavor_value is None
+              else _clean(flavor_value).lower())
+    # The url above can fall back to the built-in runner when no endpoint is
+    # saved, and that runner speaks only the OpenAI dialect. Testing it over
+    # Ollama's native routes because a tickbox was left ticked answers 404
+    # against a server that is working perfectly, and sends the operator
+    # looking for a fault that is not there.
+    if url.rstrip("/") == _local_base_url().value.rstrip("/"):
+        flavor = FLAVOR_OPENAI
 
     # allow_override=False and an explicit url: the test must measure the
     # endpoint being tested, never quietly fall back to whatever is saved.
     runner = ModelRunner(url=url, api_key=key, allow_override=False,
-                         timeout=CHECK_TIMEOUT, retries=1)
+                         timeout=CHECK_TIMEOUT, retries=1, flavor=flavor)
     try:
         models = runner.list_models()
     except ModelRunnerError as exc:
@@ -491,6 +604,398 @@ def check_connection(base_url_value: str = "", model_value: str = "",
         f"reached {runner.url}, but it does not serve {want} - it offers "
         f"{', '.join(models[:8])}" + (" ..." if len(models) > 8 else ""),
         runner.url, models, False)
+
+
+# --------------------------------------------------------------------------
+# the vision model
+#
+# Transcription is the one stage that hands a picture to a model, and it has
+# always run on the local runner with a model named by VLM_MODEL in .env. That
+# pinning was deliberate - a server chosen for its text model may serve no
+# vision model at all - but it made the two settings move independently in the
+# worst way: the operator pointed the text model at their own Ollama server,
+# uploaded a scan, and was told VLM_MODEL was not set, naming a file they had
+# never edited about a model they had never chosen.
+#
+# So the vision model is configured here, in the same place and in the same
+# vocabulary as the text model, with one addition the text model has no use
+# for. Where the endpoint can be asked what a model actually does, it is asked,
+# because this is the one place in the pipeline where the wrong model does not
+# announce itself. A text-only model given a page image returns fluent, ordered,
+# entirely invented text, and that text is written to disk as the page's
+# contents and read afterwards as evidence.
+# --------------------------------------------------------------------------
+def vision_scope() -> str:
+    """Where transcription runs: the local runner, or the operator's endpoint.
+
+    Anything that is not exactly the external marker reads as local, which is
+    the same rule mode() follows and for a stronger reason. Local is what
+    transcription has always done; an unset key, an older database and a word
+    nothing here recognises must all leave page images on this machine rather
+    than send them to a server on the strength of a value nobody can read.
+    """
+    return (VISION_EXTERNAL
+            if _setting(SETTING_VISION_SCOPE) == VISION_EXTERNAL
+            else VISION_LOCAL)
+
+
+def is_vision_external() -> bool:
+    """True when transcription should use the operator's own endpoint."""
+    return vision_scope() == VISION_EXTERNAL
+
+
+def set_vision_scope(value: str) -> None:
+    """Store where vision runs. The only writer, and it validates its input.
+
+    Refusing an unrecognised value rather than storing it, exactly as set_mode
+    does: vision_scope() would read it back as local, and the operator would be
+    told their scans were going to their server while they were not.
+    """
+    chosen = _clean(value).lower()
+    if chosen not in VISION_SCOPES:
+        raise SettingsError(
+            f"the vision scope must be {VISION_LOCAL!r} or "
+            f"{VISION_EXTERNAL!r} (got {value!r})")
+    state.set_setting(SETTING_VISION_SCOPE, chosen)
+
+
+def stored_vision_model() -> str:
+    """The saved vision model name, whatever scope is in force."""
+    return _setting(SETTING_VISION_MODEL)
+
+
+def vision_model() -> Resolved:
+    """Which vision model to ask, and where that name came from.
+
+    The stored name applies under either scope, unlike the text model, whose
+    stored name is read only in external mode. The difference is that the text
+    model has an environment variable per mode to fall back on and vision does
+    not: reading the stored name only when external would leave the settings
+    page unable to name a model on the local runner at all, which is half of
+    what this feature is for.
+
+    VLM_MODEL remains the fallback for the local runner, so a machine that has
+    been working from .env goes on working untouched. It is deliberately not a
+    fallback for someone else's endpoint - that is the mistake this whole
+    module exists to prevent, and it has already been made once here with
+    TEXT_MODEL: the local model's name on a remote server produces an error
+    about a model that server has never heard of.
+    """
+    stored = _setting(SETTING_VISION_MODEL)
+    if stored:
+        return Resolved(stored, "settings")
+    if is_vision_external():
+        return Resolved("", "unset")
+    from_env = _clean(env_str("VLM_MODEL", ""))
+    if from_env:
+        return Resolved(from_env, "environment")
+    return Resolved("", "unset")
+
+
+def effective_vision_model() -> str:
+    """The model name transcription should ask for; empty when none is set."""
+    return vision_model().value
+
+
+def vision_model_label() -> str:
+    """How to name the source of the vision model in an error message.
+
+    The label follows the value for the reason text_model_label() exists: an
+    operator sent to .env for a name they chose on a page looks in the wrong
+    file, and an operator sent to a page for a name that came from .env finds a
+    field that is empty and correct.
+    """
+    source = vision_model().source
+    if source == "settings":
+        return "the vision model chosen on the settings page"
+    if source == "environment":
+        return "VLM_MODEL in .env"
+    return "the vision model"
+
+
+def vision_base_url() -> Resolved:
+    """The endpoint transcription talks to, and where that address came from.
+
+    External scope borrows the text model's saved endpoint rather than keeping
+    a second one. An operator with two endpoints is not the case this was built
+    for; an operator with one, who has already typed it in, is.
+    """
+    if not is_vision_external():
+        return _local_base_url()
+    stored = _setting(SETTING_BASE_URL)
+    if stored:
+        return Resolved(stored, "settings")
+    # External with nothing saved is a misconfiguration rather than a fallback,
+    # for the reason base_url() gives: naming the local address under a heading
+    # that says otherwise is how an operator comes to believe a check passed.
+    return Resolved("", "unset")
+
+
+def vision_api_flavor() -> str:
+    """The dialect transcription speaks: "openai" or "ollama".
+
+    Local scope is the built-in Model Runner, which speaks the OpenAI dialect
+    and nothing else, so the tickbox that belongs to the operator's endpoint
+    must not follow vision back onto the local runner. External scope uses the
+    saved dialect, because it is the saved endpoint being talked to.
+    """
+    return stored_api_flavor() if is_vision_external() else FLAVOR_OPENAI
+
+
+def vision_can_be_verified() -> bool:
+    """Whether this endpoint can be asked what a model is capable of.
+
+    Only Ollama's native API answers that question. The page needs to know
+    before it asks, so that it can say "not verified" as a property of the
+    dialect rather than as the outcome of a check that appeared to fail.
+    """
+    return vision_api_flavor() == FLAVOR_OLLAMA
+
+
+def vision_client_override() -> tuple[str, str, str]:
+    """The endpoint, key and dialect for the client transcription builds.
+
+    Local scope returns ("", "", "openai"), which is exactly the chain
+    transcription has always followed - the environment, then the built-in
+    runner, unix socket included. Nothing stored is consulted in that scope.
+
+    External scope raises rather than returning empty when no endpoint is
+    saved. An empty return would send page images to the local runner while the
+    page said they were going elsewhere, and this is the stage where a quiet
+    substitution does the most damage.
+    """
+    if not is_vision_external():
+        return "", "", FLAVOR_OPENAI
+    url = _setting(SETTING_BASE_URL)
+    if not url:
+        raise ModelRunnerError(
+            "transcription is set to run on the external endpoint, but no "
+            "endpoint address is saved - enter one on the settings page, or "
+            "set transcription back to the local runner")
+    return url, _api_key(), stored_api_flavor()
+
+
+def vision_missing_message() -> str:
+    """What to say when no vision model is configured anywhere.
+
+    The first line stands alone, because the callers of this pipeline print
+    only the first line - and it has to carry both halves of the news: where to
+    fix it, and what it stops. An operator who reads "no vision model" without
+    the second half has no way to tell whether their whole upload is broken or
+    only the scans in it.
+    """
+    return (
+        "No vision model is set, so pages that can only be read from an image "
+        "cannot be transcribed - choose one on the settings page, under the "
+        "vision model.\n"
+        "This affects scans and photographs only. A PDF whose text can be "
+        "extracted never reaches this stage and is unaffected.\n"
+        "VLM_MODEL in .env is still honoured for the local runner, if you "
+        "would rather set it there.")
+
+
+def save_vision_model(model: str | None) -> None:
+    """Store the vision model name. None leaves it alone; "" clears it.
+
+    The same empty-means-cleared rule the endpoint fields follow, with the same
+    None sentinel for a field the form did not send at all.
+    """
+    if model is None:
+        return
+    state.set_setting(SETTING_VISION_MODEL, _validate_model(model))
+
+
+def save_vision_config(model: str | None = None,
+                       scope: str | None = None) -> None:
+    """Store what the vision half of the form sent, in a safe order.
+
+    The model is written before the scope for the reason main.py writes the
+    endpoint before the mode: the scope must never be in force for the moment
+    before the model it names has been stored. Either may be None, meaning the
+    form did not send it and the saved value stands.
+    """
+    save_vision_model(model)
+    if scope is not None:
+        set_vision_scope(scope)
+
+
+@dataclass(frozen=True)
+class VisionConfig:
+    """The effective vision configuration, safe to hand to a template."""
+
+    model: Resolved
+    scope: str = VISION_LOCAL
+    stored_model: str = ""
+    url: Resolved = Resolved("", "unset")
+    api_flavor: str = FLAVOR_OPENAI
+
+    @property
+    def is_external(self) -> bool:
+        return self.scope == VISION_EXTERNAL
+
+    @property
+    def can_be_verified(self) -> bool:
+        """Whether this endpoint could be asked about a model's capabilities."""
+        return self.api_flavor == FLAVOR_OLLAMA
+
+    @property
+    def is_set(self) -> bool:
+        return bool(self.model.value)
+
+
+def vision_config() -> VisionConfig:
+    """Everything the settings page needs about vision, and nothing else."""
+    return VisionConfig(model=vision_model(), scope=vision_scope(),
+                        stored_model=stored_vision_model(),
+                        url=vision_base_url(), api_flavor=vision_api_flavor())
+
+
+def vision_config_as_dict() -> dict:
+    """The effective vision configuration as plain data, for a JSON response."""
+    cfg = vision_config()
+    return {"scope": cfg.scope,
+            "is_external": cfg.is_external,
+            "can_be_verified": cfg.can_be_verified,
+            "is_set": cfg.is_set,
+            "api_flavor": cfg.api_flavor,
+            "model": {"value": cfg.model.value, "source": cfg.model.source},
+            "url": {"value": cfg.url.value, "source": cfg.url.source},
+            "stored": {"model": cfg.stored_model}}
+
+
+@dataclass
+class VisionCheckResult:
+    """The outcome of one vision check, in terms an operator can act on.
+
+    vision is three-valued on purpose. True and False are answers from the
+    endpoint; None means it was not able to be asked, which is neither a pass
+    nor a failure and must not be rendered as either. ok says whether the
+    configuration can be used at all, so it is True for an unverifiable model -
+    transcription will run - and the page is expected to show the difference
+    rather than a green tick.
+    """
+
+    ok: bool
+    message: str
+    url: str = ""
+    model: str = ""
+    vision: bool | None = None
+    capabilities: list[str] = field(default_factory=list)
+    models: list[str] = field(default_factory=list)
+
+    @property
+    def verified(self) -> bool:
+        return self.vision is True
+
+    def as_dict(self) -> dict:
+        return {"ok": self.ok, "message": self.message, "url": self.url,
+                "model": self.model, "vision": self.vision,
+                "capabilities": self.capabilities, "models": self.models,
+                "verified": self.verified}
+
+
+def check_vision(model_value: str = "",
+                 scope_value: str | None = None) -> VisionCheckResult:
+    """Check that the chosen vision model exists and can actually see.
+
+    Called with no arguments this tests what is saved. Called with the values
+    from an unsaved form it tests those, which is the order that helps: an
+    operator should learn that a model cannot read an image before a scan is
+    transcribed by it.
+
+    Two questions are asked, and they are different questions. The first -
+    does this endpoint serve this model - can be asked of anything, and is the
+    one the text model's check already asks. The second - does this model
+    report vision - can only be asked of Ollama's native API, and where it
+    cannot be asked this says so rather than passing quietly.
+    """
+    scope = (vision_scope() if scope_value is None
+             else _clean(scope_value).lower())
+    if scope not in VISION_SCOPES:
+        return VisionCheckResult(
+            False, f"the vision scope must be {VISION_LOCAL!r} or "
+                   f"{VISION_EXTERNAL!r} (got {scope_value!r})")
+
+    want = _clean(model_value) or stored_vision_model()
+    if not want and scope == VISION_LOCAL:
+        want = _clean(env_str("VLM_MODEL", ""))
+
+    if scope == VISION_EXTERNAL:
+        url, key, flavor = stored_base_url(), _api_key(), stored_api_flavor()
+        if not url:
+            return VisionCheckResult(
+                False, "no endpoint address is saved, so there is nowhere to "
+                       "run vision - enter one, or keep vision on the local "
+                       "runner")
+    else:
+        # The local runner is reached exactly as transcription reaches it, the
+        # unix socket included, so what is tested here is what will run.
+        url, key, flavor = _local_base_url().value, "", FLAVOR_OPENAI
+
+    try:
+        url = _validate_url(url)
+    except SettingsError as exc:
+        return VisionCheckResult(False, str(exc), url)
+    if not want:
+        return VisionCheckResult(
+            False, "no vision model is chosen, so scans and photographs "
+                   "cannot be read", url)
+
+    # allow_override=False with an explicit url, as the text check does: the
+    # test must measure what it names. from_settings follows the scope so that
+    # a remedy names the settings page rather than MODEL_URL.
+    runner = ModelRunner(url=url, api_key=key, allow_override=False,
+                         timeout=CHECK_TIMEOUT, retries=1, flavor=flavor,
+                         from_settings=scope == VISION_EXTERNAL)
+    try:
+        models = runner.list_models()
+    except ModelRunnerError as exc:
+        return VisionCheckResult(False, str(exc).splitlines()[0], runner.url,
+                                 want)
+    except Exception as exc:                     # unexpected, still not fatal
+        return VisionCheckResult(False, f"the test failed: {exc}", runner.url,
+                                 want)
+
+    if not models:
+        return VisionCheckResult(
+            False, f"reached {runner.url}, but it lists no models, so it "
+                   f"cannot be confirmed to serve {want}", runner.url, want,
+            models=models)
+    if not any(same_model(want, have) for have in models):
+        return VisionCheckResult(
+            False,
+            f"reached {runner.url}, but it does not serve {want} - it offers "
+            f"{', '.join(models[:8])}" + (" ..." if len(models) > 8 else ""),
+            runner.url, want, models=models)
+
+    caps = runner.capabilities(want)
+    listed = list(caps.values)
+    if caps.vision is True:
+        return VisionCheckResult(
+            True, f"{runner.url} serves {want} and it reports vision - it can "
+                  f"read page images", runner.url, want, True, listed, models)
+    if caps.vision is False:
+        # Known, and known to be wrong. This is the case worth the whole
+        # exercise: the model would answer, and the answer would be invented.
+        return VisionCheckResult(
+            False,
+            f"{runner.url} serves {want}, but it reports no vision capability "
+            f"(it reports {', '.join(listed)}) - transcription will refuse it, "
+            f"because a model that cannot see a page image writes a plausible "
+            f"one instead. Choose a model that reports vision.",
+            runner.url, want, False, listed, models)
+    return VisionCheckResult(
+        True,
+        f"{runner.url} serves {want}, but whether it can read images could not "
+        f"be verified: {caps.detail}. Transcription will run - check yourself "
+        f"that this model reads images.",
+        runner.url, want, None, listed, models)
+
+
+def check_vision_connectivity(model_value: str = "",
+                              scope_value: str | None = None) -> dict:
+    """check_vision() as a plain dictionary, for the browser."""
+    return check_vision(model_value, scope_value).as_dict()
 
 
 # --------------------------------------------------------------------------
@@ -529,10 +1034,25 @@ class PageConfig:
     mode: str = MODE_LOCAL
     stored_url: str = ""
     stored_model: str = ""
+    api_flavor: str = FLAVOR_OPENAI
+    stored_api_flavor: str = FLAVOR_OPENAI
+    # Vision travels with the rest rather than beside it, so the page reads one
+    # object. It is a whole configuration of its own - model, scope, endpoint,
+    # dialect - because vision does not have to run where the text model runs.
+    vision: VisionConfig | None = None
 
     @property
     def is_external(self) -> bool:
         return self.mode == MODE_EXTERNAL
+
+    @property
+    def is_ollama_api(self) -> bool:
+        """Whether the dialect is in force, which is not the same as ticked.
+
+        The tickbox renders from stored_api_flavor; this says whether it is
+        doing anything, which in local mode it is not.
+        """
+        return self.api_flavor == FLAVOR_OLLAMA
 
 
 def effective_config() -> PageConfig:
@@ -546,7 +1066,10 @@ def effective_config() -> PageConfig:
                         is_set=bool(key)),
         mode=mode(),
         stored_url=stored_base_url(),
-        stored_model=stored_text_model())
+        stored_model=stored_text_model(),
+        api_flavor=api_flavor(),
+        stored_api_flavor=stored_api_flavor(),
+        vision=vision_config())
 
 
 def config_as_dict() -> dict:
@@ -554,12 +1077,19 @@ def config_as_dict() -> dict:
     cfg = effective_config()
     return {"mode": cfg.mode,
             "is_external": cfg.is_external,
+            "api_flavor": cfg.api_flavor,
+            "is_ollama_api": cfg.is_ollama_api,
             "url": {"value": cfg.url.value, "source": cfg.url.source},
             "model": {"value": cfg.model.value, "source": cfg.model.source},
             "api_key": {"masked": cfg.api_key.masked,
                         "source": cfg.api_key.source,
                         "is_set": cfg.api_key.is_set},
-            "stored": {"url": cfg.stored_url, "model": cfg.stored_model}}
+            "stored": {"url": cfg.stored_url, "model": cfg.stored_model,
+                       "api_flavor": cfg.stored_api_flavor},
+            # Nested rather than flattened in: every key under "vision"
+            # describes the vision model, and a reader that skips the block
+            # cannot mistake one of them for a text-model setting.
+            "vision": vision_config_as_dict()}
 
 
 def save_config(url: str | None = None, model: str | None = None,
@@ -576,7 +1106,9 @@ def save_config(url: str | None = None, model: str | None = None,
     write the local address into the operator's endpoint field behind them.
 
     The mode is not written here. It has its own writer, set_mode(), because it
-    is the one field with no text box and no empty-means-unchanged rule.
+    is the one field with no text box and no empty-means-unchanged rule. The
+    API flavour is the second such field and has its own writer for the same
+    reason: set_api_flavor().
     """
     save(base_url_value=stored_base_url() if url is None else url,
          model_value=stored_text_model() if model is None else model,

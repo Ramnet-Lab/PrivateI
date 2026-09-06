@@ -27,7 +27,7 @@ $ErrorActionPreference = 'Continue'
 $Root = $PSScriptRoot
 Set-Location $Root
 
-$Interval = 300
+$Interval = 10
 if ("$Env:UPDATE_INTERVAL" -match '^\d+$') { $Interval = [int]$Env:UPDATE_INTERVAL }
 $PidFile = Join-Path $Root '.auto-update.pid'
 $LogFile = Join-Path $Root 'auto-update.log'

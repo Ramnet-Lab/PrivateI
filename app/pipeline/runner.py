@@ -181,6 +181,17 @@ def cancel_inflight(doc_id: str | None = None,
     return run.doc_id
 
 
+def inflight() -> str | None:
+    """The document the worker is inside right now, or None.
+
+    A caller that has just cancelled needs to know whether the run actually
+    let go. Deletion in particular cannot treat a timed-out cancel as a
+    completed one: the abandoned run is still writing.
+    """
+    with _current_lock:
+        return _current.doc_id if _current is not None else None
+
+
 def queue_depth() -> int:
     return _queue.qsize()
 

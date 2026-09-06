@@ -17,7 +17,7 @@
 set -Eeuo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
-INTERVAL="${UPDATE_INTERVAL:-300}"       # seconds between checks
+INTERVAL="${UPDATE_INTERVAL:-10}"        # seconds between checks
 PIDFILE=".auto-update.pid"
 LOGFILE="auto-update.log"
 
