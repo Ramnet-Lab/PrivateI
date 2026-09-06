@@ -15,7 +15,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 
 from . import paths, state
 from .config import env_bool, env_int
@@ -37,8 +37,41 @@ def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def write_page_image(doc_id: str, page_num: int, image: np.ndarray) -> Path:
-    out, _meta = normalize(image)
+def load_upright(src: Path) -> np.ndarray:
+    """Decode an image file the way it was meant to be looked at.
+
+    A phone does not rotate the pixels it saves. It writes them in sensor order
+    and records the rotation as an EXIF tag, and every viewer applies that tag
+    on the way to the screen - which is why the photograph looks right in the
+    gallery and arrives here on its side. Pillow does not apply it either
+    unless asked, and OpenCV cannot: it never sees the metadata.
+
+    Nothing downstream recovers from this. Tesseract runs with --psm 3, which
+    has no orientation detection, so a sideways page reads as noise and routes
+    to the vision model; the vision model is then handed a sideways page and
+    answers anyway, in fluent invented text. One tag, applied here, or every
+    photograph in the system is read at ninety degrees.
+    """
+    with Image.open(src) as im:
+        upright = ImageOps.exif_transpose(im) or im
+        if upright.size != im.size:
+            log.info("%s: applied the EXIF rotation (%s -> %s)", src.name,
+                     "x".join(map(str, im.size)), "x".join(map(str, upright.size)))
+        return cv2.cvtColor(np.array(upright.convert("RGB")), cv2.COLOR_RGB2BGR)
+
+
+def write_page_image(doc_id: str, page_num: int, image: np.ndarray, *,
+                     photo: bool = False) -> Path:
+    out, meta = normalize(image, photo=photo)
+    if photo:
+        # Worth a line each time: page-finding either fired or did not, and
+        # which one it was is the first thing to know when a transcript comes
+        # back wrong.
+        log.info("%s p%s: %s, %dx%d, deskew %.2f deg", doc_id, page_num,
+                 ("page found and flattened from " + meta["cropped_from"]
+                  if meta.get("page_found") else "no page outline found, "
+                  "keeping the whole frame"),
+                 meta["width"], meta["height"], meta["deskew_deg"])
     dest = paths.page_image(doc_id, page_num)
     dest.parent.mkdir(parents=True, exist_ok=True)
     # The temp name keeps a .png extension: OpenCV picks its encoder from the
@@ -144,9 +177,14 @@ def ingest_docx(src: Path, doc_id: str, on_progress) -> int:
 
 def ingest_image(src: Path, doc_id: str, on_progress) -> int:
     on_progress("normalising image")
-    with Image.open(src) as im:
-        arr = cv2.cvtColor(np.array(im.convert("RGB")), cv2.COLOR_RGB2BGR)
-    dest = write_page_image(doc_id, 1, arr)
+    arr = load_upright(src)
+    # An uploaded image file is a photograph until proved otherwise, and there
+    # is no proving it: a flatbed scan saved as a JPEG and a phone picture of
+    # the same page are the same file type. The photograph path is written to
+    # cost nothing on a page that turns out to be flat - it looks for an
+    # outline, finds none inside a scan's own borders, and leaves the frame
+    # alone - so guessing "photograph" is the guess that is cheap when wrong.
+    dest = write_page_image(doc_id, 1, arr, photo=True)
     with state.tx() as conn:
         _record_page(conn, doc_id, 1, image=dest)
     return 1

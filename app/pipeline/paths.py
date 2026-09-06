@@ -42,6 +42,18 @@ def page_image(doc_id: str, page_num: int) -> Path:
     return PAGES / doc_id / f"page_{page_num:04d}.png"
 
 
+def model_image(doc_id: str, page_num: int) -> Path:
+    """The reduced copy of a page that is sent to a vision model.
+
+    Beside the page image rather than in a temporary directory, and deliberately
+    kept: when a transcript is wrong the first question is what the model was
+    actually shown, and on this pipeline that has already been the answer once.
+    It lives inside the document's own folder, so deleting or re-ingesting the
+    document takes it with everything else.
+    """
+    return PAGES / doc_id / f"page_{page_num:04d}.model.jpg"
+
+
 def transcript_txt(doc_id: str, page_num: int) -> Path:
     return TEXT / doc_id / f"page_{page_num:04d}.txt"
 

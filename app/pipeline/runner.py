@@ -345,8 +345,8 @@ def process(doc_id: str, token: CancelToken | None = None) -> None:
             "SELECT COUNT(*) AS n FROM pages WHERE doc_id=? AND route='vlm' "
             "AND text_path IS NULL", (doc_id,))
         if pending and pending["n"]:
-            notes.append(f"{pending['n']} page(s) need a vision model. "
-                         f"{str(exc).splitlines()[0]}")
+            notes.append(f"{pending['n']} page(s) can only be read from their "
+                         f"image. {str(exc).splitlines()[0]}")
     except OllamaError as exc:
         notes.append(str(exc).splitlines()[0])
 
@@ -357,6 +357,21 @@ def process(doc_id: str, token: CancelToken | None = None) -> None:
     total_pages = read["total"] if read else 0
     pages_with_text = (read["with_text"] or 0) if read else 0
 
+    # Why a page could not be read is recorded on the page itself, and until
+    # now nothing asked. Transcription handles a failed page in place so that
+    # one bad page cannot sink the document - which also means the failure
+    # never reaches the handlers above, and this summary was left with nothing
+    # to report but the guess below. The truth was one table away the whole
+    # time: a 400 from the endpoint sat in pages.error while the document said
+    # the operator had not set a model.
+    for row in state.query(
+            "SELECT DISTINCT error FROM pages WHERE doc_id=? "
+            "AND text_path IS NULL AND error IS NOT NULL AND error<>''",
+            (doc_id,)):
+        reason = row["error"].splitlines()[0].strip()
+        if reason and reason not in notes:
+            notes.append(reason)
+
     if total_pages and pages_with_text == 0:
         # Nothing was readable, so there is nothing to extract from.  Saying
         # "done" here would claim the document had no content, which is a
@@ -364,8 +379,13 @@ def process(doc_id: str, token: CancelToken | None = None) -> None:
         state.set_status(
             doc_id, "incomplete", stage="reading",
             progress=f"no text could be read from {total_pages} page(s)",
+            # The fallback admits ignorance rather than naming a cause. It used
+            # to say the operator should set VLM_MODEL, which was a guess even
+            # when that setting existed, and after vision started following the
+            # model on the settings page it sent people to edit a file about a
+            # variable nothing reads - while the real error sat unshown.
             error="; ".join(notes)[:400] or
-                  "these pages need a vision model - set VLM_MODEL in .env")
+                  "no stage recorded why - see the app log for this document")
         return
     if pages_with_text < total_pages:
         notes.append(f"{total_pages - pages_with_text} of {total_pages} page(s) "

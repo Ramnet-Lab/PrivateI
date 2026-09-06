@@ -48,12 +48,49 @@ TARGET_CHARS = 900      # passages large enough to carry an answer
 OVERLAP_CHARS = 150     # so a fact split across a boundary is still findable
 BATCH = 16
 
+
+def _split_run(run: str) -> list[str]:
+    """Cut text that neither a blank line nor a full stop can divide.
+
+    A page the vision model could not read comes back as one unbroken run -
+    no paragraph breaks, no sentence endings, sometimes the same "[illegible]"
+    over and over - and both of the boundaries above it are missing from
+    exactly that kind of page. Left whole it goes to the embedding server as a
+    single input, and a server that refuses anything past its batch of 512
+    tokens answers with a 500 that costs the whole document its index, not
+    just the one bad page. Words are the boundary that is always there; a run
+    with no spaces in it either is cut mid-word rather than not at all.
+    """
+    pieces: list[str] = []
+    current = ""
+    for word in run.split():
+        while len(word) > TARGET_CHARS:
+            if current:
+                pieces.append(current)
+                current = ""
+            pieces.append(word[:TARGET_CHARS])
+            word = word[TARGET_CHARS:]
+        if current and len(current) + len(word) + 1 > TARGET_CHARS:
+            pieces.append(current)
+            current = word
+        else:
+            current = f"{current} {word}".strip()
+    if current:
+        pieces.append(current)
+    return pieces
+
+
 _cache_lock = threading.Lock()
 _cache: dict | None = None
 
 
 def chunk_text(text: str) -> list[str]:
-    """Split on paragraphs, then sentences, keeping a little overlap."""
+    """Split on paragraphs, then sentences, then words, keeping a little overlap.
+
+    No passage comes back longer than TARGET_CHARS + OVERLAP_CHARS, whatever
+    the page looks like: what carries the size guarantee is the last split,
+    which needs nothing of the text but its spaces.
+    """
     text = text.strip()
     if not text:
         return []
@@ -71,6 +108,14 @@ def chunk_text(text: str) -> list[str]:
         sentences = re.split(r"(?<=[.!?])\s+", para)
         current = ""
         for sentence in sentences:
+            if len(sentence) > TARGET_CHARS:
+                # Over the limit on its own, so there is nothing to pack it
+                # into: put down what is held and cut the sentence itself.
+                if current.strip():
+                    pieces.append(current.strip())
+                    current = ""
+                pieces.extend(_split_run(sentence))
+                continue
             if current and len(current) + len(sentence) + 1 > TARGET_CHARS:
                 pieces.append(current.strip())
                 current = current[-OVERLAP_CHARS:] + " " + sentence
@@ -201,7 +246,13 @@ def search(question: str, k: int = 8) -> list[dict]:
         return keyword_search(question, k)
 
     client = _client()
-    vector = np.asarray(client.embed(model, [question])[0], dtype=np.float32)
+    # Through the same splitter as the pages, because a question is not always
+    # a sentence someone typed - a pasted page asking "what does this mean"
+    # would otherwise reach the server as one oversized input and take the
+    # answer down with it. Short questions come back as one piece and average
+    # to themselves; long ones are searched on the whole of what was pasted.
+    parts = chunk_text(question) or [question[:TARGET_CHARS]]
+    vector = np.asarray(client.embed(model, parts), dtype=np.float32).mean(axis=0)
     norm = float(np.linalg.norm(vector))
     if norm:
         vector = vector / norm

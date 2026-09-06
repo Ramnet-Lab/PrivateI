@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import time
 
-from . import llm_settings, paths, state
+from . import imaging, llm_settings, paths, state
 from .ingest import write_text
 from .log import get_logger
 from .model_client import (ModelMissing, ModelNotSet, Ollama, OllamaError,
@@ -69,20 +69,12 @@ def run(doc_id: str, on_progress) -> int:
     if not rows:
         return 0
 
-    # Transcription is a VISION request and does not follow the text endpoint.
-    # A server chosen for its text model may serve no vision model at all, and
-    # page images are the rawest case material there is, so where this runs is
-    # its own setting with its own default: the local runner, which is what
-    # this stage has always used.
     client = _client()
-    # The name is resolved before the endpoint is asked anything, so that "no
-    # vision model is set" is answered in its own words. require_model's
-    # version of that message names .env or the settings page by where the
-    # endpoint came from, and the answer here depends on neither: it is the
-    # settings page in both scopes, and what it stops is scans and photographs
-    # rather than the document.
-    # The same model the rest of the pipeline uses. Whether it can read an
-    # image is asked of the endpoint below rather than configured here.
+    # The same model, at the same endpoint, as every other stage - see
+    # _client() above. Whether it can read an image is asked of the endpoint
+    # below rather than configured here. The name is resolved before the
+    # endpoint is asked anything, so that "no model is set" is answered in its
+    # own words rather than as a failure to reach something.
     model = llm_settings.effective_text_model()
     if not model:
         raise ModelNotSet(
@@ -98,11 +90,20 @@ def run(doc_id: str, on_progress) -> int:
     done = 0
     for idx, row in enumerate(rows, 1):
         on_progress(f"transcribing page {idx}/{len(rows)} with {model}")
-        image = paths.under_root(row["image_path"])
-        if image is None:
+        page = paths.under_root(row["image_path"])
+        if page is None:
             continue
         started = time.time()
         try:
+            # A reduced copy goes into the request, never the page image
+            # itself. A full-size page is refused outright by the local
+            # endpoint - it caps a request body at 10 MiB and a 12-megapixel
+            # PNG is more than twice that once base64 has had it - and is
+            # merely slow everywhere else, for detail the model tiles away
+            # before it looks at anything. imaging.fit_for_model explains the
+            # two limits it works to.
+            image, fitted = imaging.fit_for_model(
+                page, paths.model_image(doc_id, row["page_num"]))
             data = client.generate(model, user, images=[image], system=system,
                                    options=options, think=thinking_enabled())
             text = (data.get("response") or "").strip()
@@ -123,6 +124,9 @@ def run(doc_id: str, on_progress) -> int:
                    WHERE doc_id=? AND page_num=?""",
                 (paths.rel(txt), model, doc_id, row["page_num"]))
         done += 1
-        log.info("%s p%s: %d chars in %.1fs (%s, prompt %s)", doc_id, row["page_num"],
-                 len(text), time.time() - started, model, version)
+        log.info("%s p%s: %d chars in %.1fs (%s, prompt %s, sent %dx%d at %.1f MB "
+                 "from %.1f MB on disk)", doc_id, row["page_num"], len(text),
+                 time.time() - started, model, version, fitted["width"],
+                 fitted["height"], fitted["bytes"] / 1e6,
+                 fitted["source_bytes"] / 1e6)
     return done
