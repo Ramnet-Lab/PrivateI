@@ -916,15 +916,24 @@ _QUOTED_SPEECH = re.compile(
     r"(?:said|says|told|shouted|yelled|replied|answered|remarked)\b", re.U)
 # Words that start a sentence in capitals and are not names. Without this, "I
 # said" and "He told me" attribute the speech to a pronoun.
-_NOT_A_NAME = {"i", "he", "she", "they", "we", "you", "it", "that", "this",
-               "who", "what", "when", "someone", "somebody", "nobody",
-               "everyone", "the", "a", "an", "and", "but", "then", "so"}
+_NOT_A_NAME = {
+    # pronouns and determiners
+    "i", "he", "she", "they", "we", "you", "it", "that", "this", "these",
+    "those", "the", "a", "an", "who", "what", "when", "where", "which",
+    # conjunctions and adverbs that begin a clause and get capitalised there
+    "and", "but", "then", "so", "if", "as", "after", "afterward",
+    "afterwards", "before", "later", "once", "while", "when", "because",
+    "eventually", "finally", "meanwhile", "anyway", "also", "next",
+    # collective nouns that are not a person
+    "airman", "airmen", "everyone", "someone", "somebody", "nobody",
+    "people", "personnel", "witnesses", "members", "leadership", "command",
+}
 _HEARD_SAY = re.compile(
     r"\b(?:heard|watched|saw)\s+([A-Z][\w.'-]*(?:\s+[A-Z][\w.'-]*){0,3})\s+"
     r"(?:say|saying|tell|telling|shout|shouting|yell|yelling)\b", re.U)
 
 
-def quoted_speaker(text: str) -> str:
+def quoted_speaker(text: str, grounded_in: str = "") -> str:
     """Who is speaking inside this text, when it is somebody else's words.
 
     resolve_person's docstring has always promised "the quoted person for a
@@ -942,11 +951,26 @@ def quoted_speaker(text: str) -> str:
         match = pattern.search(text or "")
         if not match:
             continue
-        name = match.group(1).strip()
-        # A bare rank is not a name, and neither is a sentence-initial word that
-        # only looks like one because it starts the line.
+        words = match.group(1).split()
+        # A name sits next to the speech verb, so read back from it and stop at
+        # the first word that cannot be part of one. Matching forward instead
+        # swept up whatever began the clause: "Afterward SSgt Duran" and "If I"
+        # were both being taken as the person speaking.
+        kept: list[str] = []
+        for word in reversed(words):
+            if normalize(word).strip() in _NOT_A_NAME:
+                break
+            kept.insert(0, word)
+            if len(kept) == 3:
+                break
+        name = " ".join(kept).strip()
         tokens = [t for t in normalize(name).split() if t]
         if not tokens or all(t in RANKS or t in _NOT_A_NAME for t in tokens):
+            continue
+        # And it has to be somebody the document actually names. Without this a
+        # capitalised common noun - "Airmen said" - becomes a person, and a
+        # referent that is not a person is worse than no referent at all.
+        if grounded_in and not name_grounded(name, grounded_in, ""):
             continue
         return name
     return ""
@@ -1485,7 +1509,7 @@ def validate(item: dict, page_text: str, header: str = "",
     # Reported speech overrides both. "Morgan said you will regret questioning
     # me" attributes the "me" to Morgan wherever it is recorded, and resolving
     # it to the interviewee invents a remark about a person who was listening.
-    quoted = quoted_speaker(quote)
+    quoted = quoted_speaker(quote, around)
     if quoted and normalize(quoted) != normalize(referent or ""):
         log.info("first person inside reported speech resolves to %s, not %s",
                  quoted, referent or speaker or "the interviewee")
