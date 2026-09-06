@@ -147,9 +147,15 @@ class CancelToken:
     of what has to be closed.
     """
 
-    def __init__(self, label: str = ""):
+    def __init__(self, label: str = "",
+                 reason: str = "this run has been superseded"):
         # label names the work in the exception message and nowhere else.
         self.label = label
+        # Why the run was abandoned, said by whoever knows. The default is a
+        # supersession because that is what every abort was until reports grew
+        # a Stop: a re-ingest always has a replacement queued behind it, and a
+        # report the operator stopped has nothing coming after it at all.
+        self.reason = reason
         self._flag = threading.Event()
         self._lock = threading.Lock()
         # Events to set: they wake a thread parked on a call it is about to
@@ -262,7 +268,8 @@ def raise_if_cancelled() -> None:
 
 def _cancel_message(token: CancelToken | None) -> str:
     named = f" for {token.label}" if token is not None and token.label else ""
-    return f"the model call{named} was abandoned: this run has been superseded"
+    why = token.reason if token is not None else "this run has been superseded"
+    return f"the model call{named} was abandoned: {why}"
 
 
 def _socket_of(handle: Any) -> socket.socket | None:

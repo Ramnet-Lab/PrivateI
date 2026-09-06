@@ -29,6 +29,7 @@
   <input id="runs" type="number" min="1" max="{{ max_runs }}" step="1" value="1"
          style="width: 64px">
   <button id="run" {% if not chat_model %}disabled{% endif %}>Run report</button>
+  <button type="button" id="stop" class="btn danger" hidden>Stop</button>
   <span class="run-activity">
     <span id="spin" class="spinner" hidden></span>
     <span id="status" class="small"></span>
@@ -42,6 +43,12 @@
   allegation whose disposition changes between runs was decided by sampling
   rather than by the record, and is reported as unstable. Maximum {{ max_runs }};
   each run costs a full report.
+</p>
+
+<p class="note small">
+  A report is written on the server, not in this page. Closing this tab or
+  refreshing it does not stop the run &mdash; reopening this page picks it back
+  up where it is. Stop is the way to end one early; nothing is saved when you do.
 </p>
 
 <p class="small">
@@ -86,6 +93,11 @@ const allowBox = document.getElementById('allow-incomplete');
 const consensusEl = document.getElementById('consensus');
 const spinEl = document.getElementById('spin');
 const elapsedEl = document.getElementById('elapsed');
+const runBtn = document.getElementById('run');
+const stopBtn = document.getElementById('stop');
+// Whether this page is allowed to start a report at all, read once before
+// anything below starts disabling the button for reasons of its own.
+const canRun = !runBtn.disabled;
 
 // A report is several model passes per allegation, and only two of them stream
 // anything: the findings section and the summary. The element pass and the five
@@ -97,6 +109,10 @@ const elapsedEl = document.getElementById('elapsed');
 // because a wheel turns identically over a slow pass and a dead endpoint.
 const STALLED_AFTER_MS = 120000;
 let runStartedAt = 0, phaseStartedAt = 0, lastEventAt = 0, ticker = null;
+// When the run ended, for a page attaching to one that finished before it
+// loaded. Without it the total clock measures up to now rather than up to the
+// end, and a report that took four minutes an hour ago reads as an hour long.
+let runEndedAt = null;
 
 function elapsed(ms) {
   const total = Math.max(0, Math.round(ms / 1000));
@@ -125,13 +141,21 @@ function noteEvent(newPhase) {
   if (ticker) tick();
 }
 
-function startActivity() {
-  runStartedAt = phaseStartedAt = lastEventAt = Date.now();
-  spinEl.hidden = false;
+// startedAt comes from the server, so a page that attached to a report already
+// half an hour old says half an hour rather than counting from the refresh.
+// live is false when attaching to a run that has already finished, which is
+// what a reload just after one looks like: replay the text, but no wheel.
+function startActivity(startedAt, live, finishedAt) {
+  const began = startedAt ? Date.parse(startedAt) : NaN;
+  runStartedAt = Number.isNaN(began) ? Date.now() : began;
+  const ended = finishedAt ? Date.parse(finishedAt) : NaN;
+  runEndedAt = Number.isNaN(ended) ? null : ended;
+  phaseStartedAt = lastEventAt = Date.now();
+  spinEl.hidden = !live;
   elapsedEl.hidden = false;
   elapsedEl.classList.remove('stalled');
   tick();
-  ticker = window.setInterval(tick, 1000);
+  if (live) ticker = window.setInterval(tick, 1000);
 }
 
 function stopActivity() {
@@ -139,7 +163,8 @@ function stopActivity() {
   ticker = null;
   spinEl.hidden = true;
   elapsedEl.classList.remove('stalled');
-  elapsedEl.textContent = `${elapsed(Date.now() - runStartedAt)} total`;
+  elapsedEl.textContent =
+    `${elapsed((runEndedAt || Date.now()) - runStartedAt)} total`;
 }
 
 function renumber() {
@@ -230,16 +255,97 @@ function renderConsensus(payload) {
   consensusEl.hidden = false;
 }
 
-document.getElementById('run').addEventListener('click', async () => {
+// --- watching a report --------------------------------------------------------
+// The run lives on the server; this page only watches it, and watching can stop
+// and start as often as the operator likes. Starting a report and picking one
+// back up after a refresh both come through attach(), so the reattach path
+// cannot rot quietly while the fresh-run path goes on working.
+let source = null;
+let attachedRunId = null;
+
+function setRunning(live) {
+  runBtn.disabled = live || !canRun;
+  stopBtn.hidden = !live;
+}
+
+function detach() {
+  if (source) { source.close(); source = null; }
+  attachedRunId = null;
+}
+
+function apply(kind, data) {
+  if (kind === 'status') {
+    noteEvent(true);
+    statusEl.textContent = data;
+  } else if (kind === 'run') {
+    noteEvent(true);
+    statusEl.textContent = `run ${data.n} of ${data.of} — seed ${data.seed}`;
+  } else if (kind === 'run-done') {
+    noteEvent(true);
+    statusEl.textContent = `run ${data.n} of ${data.of} finished`;
+  } else if (kind === 'token') {
+    noteEvent(false);
+    out.textContent += data;
+    out.scrollTop = out.scrollHeight;
+  } else if (kind === 'consensus') {
+    noteEvent(true);
+    renderConsensus(data);
+  } else if (kind === 'error') {
+    noteEvent(true);
+    statusEl.textContent = 'failed';
+    out.textContent += '\n\n' + data;
+  } else if (kind === 'done') {
+    noteEvent(true);
+    statusEl.innerHTML = `finished — <a href="/reports/${data.report_id}">download</a>`;
+  }
+}
+
+function attach(runId, startedAt, live, finishedAt) {
+  detach();
+  attachedRunId = runId;
   out.hidden = false;
   out.textContent = '';
   consensusEl.hidden = true;
   consensusEl.innerHTML = '';
-  statusEl.textContent = 'starting…';
-  const run = document.getElementById('run');
-  run.disabled = true;
-  startActivity();
+  startActivity(startedAt, live, finishedAt);
+  setRunning(live);
 
+  source = new EventSource(`/api/report/${runId}/events`);
+  for (const kind of ['status', 'run', 'run-done', 'token', 'consensus',
+                      'error', 'done']) {
+    source.addEventListener(kind, (ev) => {
+      let data; try { data = JSON.parse(ev.data); } catch { return; }
+      apply(kind, data);
+    });
+  }
+  // The producer says done or failed in its own words; this says only that
+  // there will be nothing more, which is what the page stops on. Without
+  // closing here the browser would reconnect to a finished run for ever.
+  source.addEventListener('ended', (ev) => {
+    let data; try { data = JSON.parse(ev.data); } catch { data = {}; }
+    if (data.status === 'stopped') statusEl.textContent = 'stopped';
+    runEndedAt = Date.now();
+    detach();
+    stopActivity();
+    setRunning(false);
+  });
+  source.onerror = () => {
+    // A dropped connection leaves EventSource reconnecting on its own, and it
+    // resends the last event id it saw, so it resumes rather than replaying.
+    // CLOSED means it has given up - the run is gone, which is what a restart
+    // looks like from here - and there is nothing left to wait for.
+    if (source && source.readyState === EventSource.CLOSED) {
+      statusEl.textContent = 'lost track of this report; it may have been ' +
+                             'stopped by a restart';
+      detach();
+      stopActivity();
+      setRunning(false);
+    }
+  };
+}
+
+runBtn.addEventListener('click', async () => {
+  statusEl.textContent = 'starting…';
   try {
     const payload = collect();
     payload.runs = runsBox.value;
@@ -248,58 +354,58 @@ document.getElementById('run').addEventListener('click', async () => {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    // A rejected request answers with JSON, not with an event stream; reading it
-    // as a stream would leave the page saying "starting…" for ever.
-    if (!res.ok) {
-      const problem = await res.json().catch(() => null);
-      throw new Error((problem && problem.detail) || `HTTP ${res.status}`);
+    const body = await res.json().catch(() => null);
+    // Refused because one is already being written. Said rather than acted on:
+    // silently attaching would look identical to having started the report that
+    // was just asked for, and it is not that report.
+    if (res.status === 409 && body && body.run_id) {
+      statusEl.innerHTML = esc(body.detail) +
+        ' <button type="button" class="btn" id="watch-existing">Watch it</button>';
+      document.getElementById('watch-existing')
+        .addEventListener('click', () => attach(body.run_id, null, true));
+      return;
     }
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const parts = buffer.split('\n\n');
-      buffer = parts.pop();
-      for (const part of parts) {
-        const kind = (part.match(/^event: (.+)$/m) || [])[1];
-        const raw = (part.match(/^data: ([\s\S]*)$/m) || [])[1];
-        if (!kind || raw === undefined) continue;
-        let data; try { data = JSON.parse(raw); } catch { continue; }
-        if (kind === 'status') {
-          noteEvent(true);
-          statusEl.textContent = data;
-        } else if (kind === 'run') {
-          noteEvent(true);
-          statusEl.textContent = `run ${data.n} of ${data.of} — seed ${data.seed}`;
-        } else if (kind === 'run-done') {
-          noteEvent(true);
-          statusEl.textContent = `run ${data.n} of ${data.of} finished`;
-        } else if (kind === 'token') {
-          noteEvent(false);
-          out.textContent += data;
-          out.scrollTop = out.scrollHeight;
-        } else if (kind === 'consensus') {
-          noteEvent(true);
-          renderConsensus(data);
-        } else if (kind === 'error') {
-          noteEvent(true);
-          statusEl.textContent = 'failed';
-          out.textContent += '\n\n' + data;
-        } else if (kind === 'done') {
-          noteEvent(true);
-          statusEl.innerHTML = `finished — <a href="/reports/${data.report_id}">download</a>`;
-        }
-      }
-    }
+    if (!res.ok) throw new Error((body && body.detail) || `HTTP ${res.status}`);
+    attach(body.run_id, body.started_at, true);
   } catch (err) {
     statusEl.textContent = 'failed: ' + err;
-  } finally {
-    stopActivity();
-    run.disabled = false;
+    setRunning(false);
   }
 });
+
+stopBtn.addEventListener('click', async () => {
+  if (!attachedRunId) return;
+  if (!confirm('Stop this report? The passes done so far are discarded and ' +
+               'nothing is saved.')) return;
+  stopBtn.disabled = true;
+  try {
+    const res = await fetch(`/api/report/${attachedRunId}/cancel`,
+                            { method: 'POST' });
+    if (res.ok) {
+      statusEl.textContent = 'stopping…';
+    } else {
+      const body = await res.json().catch(() => null);
+      statusEl.textContent = (body && body.detail) || 'could not stop it';
+    }
+  } catch (err) {
+    statusEl.textContent = 'could not stop it: ' + err;
+  } finally {
+    stopBtn.disabled = false;
+  }
+});
+
+// On load, ask whether a report is being written - or was just written - and
+// pick it up. Nothing is remembered in this page, so a refresh, a second tab
+// and a different browser all see the same run.
+(async function pickUpWhereverItIs() {
+  let body = null;
+  try {
+    const res = await fetch('/api/report/active');
+    if (res.ok) body = await res.json();
+  } catch { return; }
+  if (!body || !body.run_id) return;
+  attach(body.run_id, body.started_at, body.status === 'running',
+         body.finished_at);
+})();
 </script>
 {% endblock %}

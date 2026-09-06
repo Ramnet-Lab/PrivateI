@@ -5,6 +5,10 @@
   --danger: #d0453c;
 }
 * { box-sizing: border-box; }
+/* A class rule that sets display beats the browser's own [hidden] rule,
+   so anything hidden by the attribute and styled by a class - the run
+   wheel, the stop button - stays on screen without this. */
+[hidden] { display: none !important; }
 body { margin: 0; background: var(--bg); color: var(--text);
   font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
 
@@ -145,10 +149,6 @@ td.quote { color: var(--muted); font-size: 12px; max-width: 380px; }
 .spinner { display: inline-block; width: 12px; height: 12px; flex: none;
   border: 2px solid var(--line); border-top-color: var(--accent);
   border-radius: 50%; animation: spin .7s linear infinite; }
-/* A class rule setting display beats the browser's own [hidden] rule, so
-   without this the wheel turns before the run starts and goes on turning
-   after it finishes. */
-.spinner[hidden] { display: none; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) {
   .spinner { animation-duration: 2.4s; }

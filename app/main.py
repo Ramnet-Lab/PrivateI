@@ -27,7 +27,8 @@ APP_DIR = Path(os.environ.get("APP_DIR", "/app"))
 sys.path.insert(0, str(APP_DIR))
 
 from pipeline import (chat, consensus, embed, graph, llm_settings,  # noqa: E402
-                      model_client, paths, report, runner, state)
+                      model_client, paths, report, report_run, runner,
+                      state)
 from pipeline.log import get_logger, utcnow               # noqa: E402
 
 log = get_logger("app")
@@ -195,8 +196,40 @@ def api_objective(payload: dict):
     return JSONResponse({"saved": True, "allegations": len(report.get_allegations())})
 
 
-def _sse(kind: str, data) -> str:
-    return f"event: {kind}\ndata: {json.dumps(data)}\n\n"
+def _sse(kind: str, data, index: int | None = None) -> str:
+    """One event frame. The id is what a reconnecting EventSource sends back."""
+    head = "" if index is None else f"id: {index}\n"
+    return f"{head}event: {kind}\ndata: {json.dumps(data)}\n\n"
+
+
+def _collapse(batch: list[tuple[int, str, object]]) -> list[tuple[int, str, object]]:
+    """Merge a run of streamed tokens into one frame, keeping the order.
+
+    A page attaching to a report that is already an hour old is caught up from
+    a buffer holding every token as its own entry, which is what lets a plain
+    integer be the cursor. Sent one frame each that would be tens of thousands
+    of frames to redraw text the page will show in one paragraph. Merged here
+    instead of in the buffer, because an entry that can still grow after a
+    watcher has passed it is an entry that watcher will never see finished.
+
+    The merged frame carries the index of the LAST token in it, so a reconnect
+    resumes after the whole group rather than replaying it.
+    """
+    out: list[tuple[int, str, object]] = []
+    text: list[str] = []
+    last = 0
+    for index, kind, data in batch:
+        if kind == "token" and isinstance(data, str):
+            text.append(data)
+            last = index
+            continue
+        if text:
+            out.append((last, "token", "".join(text)))
+            text = []
+        out.append((index, kind, data))
+    if text:
+        out.append((last, "token", "".join(text)))
+    return out
 
 
 def _runs_requested(value) -> int:
@@ -244,10 +277,10 @@ def _report_runs(goal, allegations, runs: int, allow_incomplete: bool):
     for member in members:
         number, seed = member["n"], model_client.random_seed()
         member["seed"], member["error"] = seed, None
-        yield _sse("run", {"n": number, "of": runs, "seed": seed})
+        yield "run", {"n": number, "of": runs, "seed": seed}
         if runs > 1:
-            yield _sse("token", f"\n\n===== Run {number} of {runs} "
-                                f"(seed {seed}) =====\n\n")
+            yield "token", (f"\n\n===== Run {number} of {runs} "
+                            f"(seed {seed}) =====\n\n")
 
         for kind, data in report.generate(goal, allegations, seed=seed,
                                           allow_incomplete=allow_incomplete):
@@ -258,22 +291,22 @@ def _report_runs(goal, allegations, runs: int, allow_incomplete: bool):
                 member["error"] = str(data)
             elif kind == "status" and runs > 1:
                 data = f"Run {number} of {runs}: {data}"
-            yield _sse(kind, data)
+            yield kind, data
 
         if member["report_id"]:
             consensus.record_seed(member["report_id"], seed)
-            yield _sse("run-done", {"n": number, "of": runs, "seed": seed,
-                                    "report_id": member["report_id"]})
+            yield "run-done", {"n": number, "of": runs, "seed": seed,
+                              "report_id": member["report_id"]}
         if member["error"]:
             log.error("run %d of %d failed: %s", number, runs, member["error"])
             break
 
     if runs == 1:
         if members[0]["report_id"]:
-            yield _sse("done", {"report_id": members[0]["report_id"], "runs": 1})
+            yield "done", {"report_id": members[0]["report_id"], "runs": 1}
         return
 
-    yield _sse("status", "Comparing runs")
+    yield "status", "Comparing runs"
     for member in members:
         if not member["report_id"]:
             member["error"] = member["error"] or "the run produced no report"
@@ -292,7 +325,7 @@ def _report_runs(goal, allegations, runs: int, allow_incomplete: bool):
             member["error"] = f"could not be read: {exc}"
             log.error("run %d (%s) %s", member["n"], member["report_id"],
                       member["error"])
-            yield _sse("error", f"Run {member['n']} {member['error']}")
+            yield "error", f"Run {member['n']} {member['error']}"
 
     summary = consensus.compare(members)
     listing = [{k: m[k] for k in ("n", "seed", "report_id", "error")}
@@ -303,18 +336,25 @@ def _report_runs(goal, allegations, runs: int, allow_incomplete: bool):
     # answer whenever the settings page points the text model elsewhere.
     model = llm_settings.effective_text_model()
     body = consensus.render(summary, listing, created, model)
-    yield _sse("token", "\n\n" + body)
+    yield "token", "\n\n" + body
 
     done_ids = [m["report_id"] for m in members if m["report_id"]]
     report_id = consensus.save(done_ids, body, created) if done_ids else None
-    yield _sse("consensus", {"summary": summary, "runs": listing,
-                             "report_id": report_id})
+    yield "consensus", {"summary": summary, "runs": listing,
+                       "report_id": report_id}
     if report_id:
-        yield _sse("done", {"report_id": report_id, "runs": runs})
+        yield "done", {"report_id": report_id, "runs": runs}
+
+
+# Watching a report is a separate request from writing one, and that is the
+# whole point: the writing happens on a thread of its own in report_run, so the
+# page can stop watching - refresh, close, sleep - without the run noticing.
+SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 
 
 @app.post("/api/report")
 def api_report(payload: dict):
+    """Start a report. Returns its run_id; the events route is what shows it."""
     goal = payload.get("goal")
     allegations = payload.get("allegations")
     if allegations is not None and not isinstance(allegations, list):
@@ -327,16 +367,70 @@ def api_report(payload: dict):
     # edit of the database can get past.
     allow_incomplete = bool(payload.get("allow_incomplete"))
 
+    try:
+        run = report_run.start(
+            lambda: _report_runs(goal, allegations, runs, allow_incomplete))
+    except report_run.Busy as busy:
+        # Refused rather than queued. Each run is a full report - minutes of
+        # model time per allegation - so a second one is never what a double
+        # click meant, and the run_id goes back so the page can watch the report
+        # that is already being written instead of asking for another.
+        return JSONResponse(status_code=409, content={
+            "detail": "a report is already being written; watch that one "
+                      "rather than starting a second",
+            "run_id": busy.run_id})
+    return JSONResponse({"run_id": run.run_id, "started_at": run.started_at})
+
+
+@app.get("/api/report/active")
+def api_report_active():
+    """The run in flight, or the last one to finish, or nothing.
+
+    What the report page asks on load. Holding the finished run until the next
+    one starts is what makes a reload during a report and a reload just after
+    one the same request, so the page needs only one way to pick up the thread.
+    """
+    run = report_run.latest()
+    return JSONResponse(run.snapshot() if run else {"run_id": None})
+
+
+@app.get("/api/report/{run_id}/events")
+def api_report_events(run_id: str, request: Request, cursor: int = 0):
+    run = report_run.get(run_id)
+    if run is None:
+        # Including after a restart, which takes every run with it. The page
+        # clears rather than waiting for something that is not coming.
+        raise HTTPException(status_code=404, detail="no such report run")
+
+    # A browser reconnecting an EventSource of its own accord sends back the
+    # last id it saw, which is a better cursor than the query string: it is what
+    # this browser actually received, not what it asked for when it attached.
+    resume = request.headers.get("last-event-id") or ""
+    start_at = int(resume) + 1 if resume.isdigit() else cursor
+
     def events():
-        try:
-            yield from _report_runs(goal, allegations, runs, allow_incomplete)
-        except Exception as exc:
-            log.error("report stream failed: %s", exc)
-            yield _sse("error", str(exc))
+        for batch in run.follow(start_at):
+            if batch is None:
+                yield ": keepalive\n\n"
+                continue
+            for index, kind, data in _collapse(batch):
+                yield _sse(kind, data, index)
 
     return StreamingResponse(events(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache",
-                                      "X-Accel-Buffering": "no"})
+                             headers=SSE_HEADERS)
+
+
+@app.post("/api/report/{run_id}/cancel")
+def api_report_cancel(run_id: str):
+    """Stop a report and the model call it is blocked inside.
+
+    Closing the page used to be the only way to stop one, which is exactly what
+    moving the run off the request took away. This puts it back deliberately.
+    """
+    if not report_run.cancel(run_id):
+        raise HTTPException(status_code=409,
+                            detail="that report is not running")
+    return JSONResponse({"stopping": True})
 
 
 @app.get("/reports/{report_id}", response_class=PlainTextResponse)
@@ -833,6 +927,21 @@ def api_purge(payload: dict):
     graph_deleted: dict[str, int] = {}
     kept_in_raw: list[str] = []
 
+    # A report is now written on a thread of its own, which the wedge comment
+    # below used to be able to assume away. It reads the corpus for the whole
+    # of its run and writes its row at the end, so a purge overlapping one
+    # deletes documents out from under a report that is still citing them, or
+    # reports a cleared table that a run in flight then writes into. Refused
+    # rather than cancelled, for the reason given further down: a purge that
+    # abandons work tells the operator material was destroyed when some of it
+    # was not.
+    if report_run.active() is not None and (wants_documents or wants_reports):
+        raise HTTPException(
+            status_code=409,
+            detail="a report is being written from these records and would "
+                   "outlive what this deletes; stop it on the report page, or "
+                   "wait for it to finish, and try again")
+
     # The same wedge the re-ingest routes were built around. The worker is one
     # thread that spends most of its life blocked inside a model call, and it
     # goes on writing pages and assertions until it lets go, so deleting
@@ -842,9 +951,9 @@ def api_purge(payload: dict):
     # abort comes first so that the run already in flight has been told to
     # stop before a single row is deleted.
     with runner.paused():
-        # Only a purge of documents cancels: the worker never writes a report,
-        # so aborting the run it is inside to clear the reports table would
-        # abandon a document nobody asked to abandon.
+        # Only a purge of documents cancels the document worker: it never
+        # writes a report, so aborting the run it is inside to clear the
+        # reports table would abandon a document nobody asked to abandon.
         # A run that has not let go is still writing pages and assertions, and
         # deleting underneath it puts rows back after the purge has reported
         # success. Waiting longer here than a re-ingest does is deliberate: a
