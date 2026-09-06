@@ -9,7 +9,13 @@ const TYPE_COLORS = {
 const statusEl = document.getElementById('graphStatus');
 const panel = document.getElementById('panel');
 let network = null;
-let allNodes = [], allEdges = [];
+let allNodes = [], allEdges = [], inferredEdges = [];
+
+// Inferred edges are fetched separately and are off until asked for. /api/graph
+// answers what the record says, and that answer must not change because someone
+// ran a pass over it - so they are a second request, drawn differently, and the
+// page looks exactly as it did before this existed until the box is ticked.
+const INFERRED_COLOR = '#c264d6';
 
 function nodeSize(degree) {
   return 12 + Math.min(26, Math.sqrt(degree || 1) * 7);
@@ -48,6 +54,42 @@ async function load() {
 
   draw(allNodes, allEdges);
   statusEl.textContent = `${allNodes.length} entities, ${allEdges.length} connections`;
+  loadInferred();
+}
+
+async function loadInferred() {
+  let data;
+  try {
+    data = await (await fetch('/api/graph/inferred')).json();
+  } catch (err) {
+    return;                       // the evidence graph is drawn regardless
+  }
+  // Dashed, coloured and labelled with the relation, so an inference can never
+  // be read off the screen as something a document said. The tooltip leads with
+  // the word "inferred" and gives the basis instead of a quote, because there
+  // is no quote - that is the whole difference.
+  inferredEdges = (data.edges || []).map((e, i) => ({
+    id: 'inferred-' + i,
+    from: e.source,
+    to: e.target,
+    label: e.relation,
+    dashes: true,
+    width: 1,
+    color: { color: INFERRED_COLOR, opacity: 0.75 },
+    font: { color: INFERRED_COLOR, size: 11 },
+    title: `inferred — not stated in any document\n${e.relation}` +
+           ` (confidence ${(e.confidence || 0).toFixed(2)})\n${e.basis || ''}`,
+    inferred: true,
+  }));
+  const box = document.getElementById('showInferred');
+  if (inferredEdges.length) {
+    box.parentElement.title =
+      `${inferredEdges.length} inferred connection(s). Not drawn from any ` +
+      `document; a model's reading of two entities that were.`;
+  } else {
+    box.disabled = true;
+    box.parentElement.title = 'No pass has been run yet — see the Links page.';
+  }
 }
 
 function draw(nodes, edges) {
@@ -111,17 +153,25 @@ function escapeHtml(value) {
 function applyFilters() {
   const term = document.getElementById('search').value.trim().toLowerCase();
   const type = document.getElementById('typeFilter').value;
+  const withInferred = document.getElementById('showInferred').checked;
   const nodes = allNodes.filter(n =>
     (!type || n.entityType === type) &&
     (!term || n.label.toLowerCase().includes(term)));
   const keep = new Set(nodes.map(n => n.id));
-  draw(nodes, allEdges.filter(e => keep.has(e.from) && keep.has(e.to)));
-  document.getElementById('graphStatus').textContent =
-    `${nodes.length} of ${allNodes.length} entities shown`;
+  const edges = allEdges.concat(withInferred ? inferredEdges : [])
+    .filter(e => keep.has(e.from) && keep.has(e.to));
+  draw(nodes, edges);
+  const shown = withInferred
+    ? `${nodes.length} of ${allNodes.length} entities shown, ` +
+      `${edges.length - allEdges.filter(e => keep.has(e.from) && keep.has(e.to)).length}` +
+      ` inferred connection(s) included`
+    : `${nodes.length} of ${allNodes.length} entities shown`;
+  document.getElementById('graphStatus').textContent = shown;
 }
 
 document.getElementById('search').addEventListener('input', debounce(applyFilters, 250));
 document.getElementById('typeFilter').addEventListener('change', applyFilters);
+document.getElementById('showInferred').addEventListener('change', applyFilters);
 document.getElementById('refit').addEventListener('click', () => network && network.fit());
 
 function debounce(fn, ms) {

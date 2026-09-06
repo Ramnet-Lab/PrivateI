@@ -226,6 +226,76 @@ def timeline() -> list[dict]:
                ORDER BY r.event_date""")]
 
 
+# An inferred edge is written with NO triple_id, and that is load-bearing rather
+# than decorative. Every read path in this module - snapshot, entity_detail and
+# timeline - filters on "r.triple_id IS NOT NULL", so an edge without one is
+# invisible to all of them, and to every caller of them, without a single one
+# having to learn that inference exists. A reader written before this feature
+# cannot accidentally show a model's opinion as testimony, because it was already
+# asking for testimony by name.
+#
+# inferred:true is for reading the graph by hand, and for the sweep below. It is
+# not what provides the isolation; the absent triple_id is.
+INFER = """
+MATCH (a:Entity {{entity_id: $a_id}})
+MATCH (b:Entity {{entity_id: $b_id}})
+MERGE (a)-[r:{rel} {{link: $link_id}}]->(b)
+SET r.inferred = true, r.relation = $relation, r.confidence = $confidence,
+    r.basis = $basis, r.pairing = $pairing, r.model = $model,
+    r.loaded_at = $now
+"""
+
+
+def load_links(rows: list[dict]) -> int:
+    """Draw recorded entity links into the graph as inferred edges.
+
+    Entities are MATCHed rather than MERGEd: a link names two entities that
+    extraction already put in the graph, and creating one here would invent a
+    node out of an inference about it.
+    """
+    if not rows:
+        return 0
+    drawn = 0
+    with driver().session() as session:
+        for row in rows:
+            # subject_id says which way a directed relation runs; a symmetric
+            # one has none, and the stored pair order is used as written.
+            a_id, b_id = row["a_id"], row["b_id"]
+            if row.get("subject_id") == b_id:
+                a_id, b_id = b_id, a_id
+            result = session.run(
+                INFER.format(rel=rel_type(row["relation"])),
+                a_id=a_id, b_id=b_id, link_id=f"{row['a_id']}|{row['b_id']}",
+                relation=row["relation"], confidence=row.get("confidence"),
+                basis=row.get("basis"), pairing=row.get("pairing"),
+                model=row.get("model"), now=utcnow())
+            drawn += result.consume().counters.relationships_created
+    log.info("drew %d inferred edge(s) into the graph", drawn)
+    return drawn
+
+
+def clear_links() -> None:
+    """Remove every inferred edge, leaving the evidence graph as it was."""
+    with driver().session() as session:
+        session.run("MATCH ()-[r]->() WHERE r.inferred DELETE r")
+
+
+def inferred_edges(limit: int = 2000) -> list[dict]:
+    """Inferred edges for the graph page, asked for by name.
+
+    A separate query rather than a widening of snapshot(): snapshot answers
+    "what does the record say", and the answer to that must not change because
+    a pass has been run over it.
+    """
+    with driver().session() as session:
+        return [dict(r) for r in session.run(
+            """MATCH (a:Entity)-[r]->(b:Entity) WHERE r.inferred
+               RETURN a.entity_id AS source, b.entity_id AS target,
+                      r.relation AS relation, r.confidence AS confidence,
+                      r.basis AS basis, r.pairing AS pairing
+               ORDER BY r.confidence DESC LIMIT $limit""", limit=limit)]
+
+
 def clear() -> None:
     with driver().session() as session:
         session.run("MATCH (n) DETACH DELETE n")

@@ -12,6 +12,7 @@
     <a href="/" {% if request.url.path == '/' %}class="on"{% endif %}>Documents</a>
     <a href="/chat" {% if request.url.path == '/chat' %}class="on"{% endif %}>Chat</a>
     <a href="/graph" {% if request.url.path == '/graph' %}class="on"{% endif %}>Graph</a>
+    <a href="/links" {% if request.url.path == '/links' %}class="on"{% endif %}>Links</a>
     <a href="/timeline" {% if request.url.path == '/timeline' %}class="on"{% endif %}>Timeline</a>
     <a href="/report" {% if request.url.path == '/report' %}class="on"{% endif %}>Report</a>
     <a href="/settings" {% if request.url.path == '/settings' %}class="on"{% endif %}>Settings</a>
@@ -21,6 +22,7 @@
     <span>{{ c.pages }} pages</span>
     <span>{{ c.entities }} entities</span>
     <span>{{ c.assertions }} facts</span>
+    {% if c.links %}<span>{{ c.links }} links</span>{% endif %}
   </div>
 </header>
 <main{% block main_attrs %}{% endblock %}>{% block content %}{% endblock %}</main>

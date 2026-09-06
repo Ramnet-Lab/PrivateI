@@ -1,0 +1,365 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Links</h1>
+<p class="note small">
+  Extraction reads one page at a time, so nothing in the pipeline ever compares
+  two assertions with each other. This does: one pass per pair of categories,
+  each asking the question that pair actually raises. Everything below is
+  <strong>inference, not testimony</strong> &mdash; no line of it came out of a
+  document, and none of it is visible to the timeline, the entity panel, or a
+  report.
+  {% if not chat_model %}<strong>No text model is set. Choose one on the settings page.</strong>{% endif %}
+</p>
+
+<div class="row">
+  <label class="small" for="mode">Compare</label>
+  <select id="mode">
+    <option value="grouped">every pair, compared in groups</option>
+    <option value="connected">only pairs with something in common</option>
+    <option value="exhaustive">every pair, one at a time</option>
+  </select>
+  <label class="small"><input type="checkbox" id="keep-fragments">
+    include claims that are not assertions</label>
+  <button id="run" {% if not chat_model %}disabled{% endif %}>Run pass</button>
+  <button type="button" id="stop" class="btn danger" hidden>Stop</button>
+  <span class="run-activity">
+    <span id="spin" class="spinner" hidden></span>
+    <span id="status" class="small"></span>
+    <span id="elapsed" class="elapsed" hidden></span>
+  </span>
+</div>
+
+<div id="estimate" class="small note">working out what that would cost&hellip;</div>
+
+<p id="exhaustive-warning" class="warn" hidden></p>
+
+<p class="note small">
+  <strong>Every pair, compared in groups</strong> shows the model a set of items
+  at a time and asks which of them connect. It still covers every pair &mdash;
+  the sets are tiled so each pair falls in exactly one of them &mdash; but a set
+  of 50 items covers 625 pairs for the same prompt that one-at-a-time spends on
+  25, because an item is written out once instead of once per pair. That is
+  where the saving comes from, and it is why this is the sensible default.
+  <br>
+  <strong>Only pairs with something in common</strong> compares two items when
+  they share a page, a document or a date, or when their wording is close. The
+  quickest, and the only one that can miss a pair outright.
+  <br>
+  <strong>Every pair, one at a time</strong> is the same coverage as the first,
+  asked one pair per question so the model has nothing else in front of it.
+  Slowest by a wide margin; worth it only where a missed connection matters more
+  than a day of machine time.
+  <br>
+  Whichever you pick, a pair is judged once and the answer is kept, so a stopped
+  run resumes rather than starting again and you can do this in stages.
+</p>
+
+<div id="out" class="report-out" hidden></div>
+
+<h2>Connections found</h2>
+{% if summary.by_pairing %}
+<p class="small">
+  {{ summary.links }} connection(s) from {{ summary.judged }} pair(s) judged.
+  <label>Show
+    <select id="filter">
+      <option value="">every pairing</option>
+      {% for p in pairings %}<option value="{{ p }}">{{ p }}</option>{% endfor %}
+    </select>
+  </label>
+</p>
+{% endif %}
+
+<table id="found">
+  <tr><th>Pairing</th><th></th><th>Relation</th><th></th><th>Basis</th><th>Confidence</th></tr>
+  {% for l in found %}
+  <tr data-pairing="{{ l.pairing }}">
+    <td class="small">{{ l.pairing }}</td>
+    <td>{{ l.a_name }}</td>
+    <td class="small"><span class="tag">{{ l.relation }}</span></td>
+    <td>{{ l.b_name }}</td>
+    <td class="small">{{ l.basis }}</td>
+    <td class="small">{{ '%.2f'|format(l.confidence or 0) }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% if not found %}
+<p class="empty">Nothing compared yet.</p>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+const modeBox = document.getElementById('mode');
+const keepBox = document.getElementById('keep-fragments');
+const estimateEl = document.getElementById('estimate');
+const warnEl = document.getElementById('exhaustive-warning');
+const statusEl = document.getElementById('status');
+const out = document.getElementById('out');
+const spinEl = document.getElementById('spin');
+const elapsedEl = document.getElementById('elapsed');
+const runBtn = document.getElementById('run');
+const stopBtn = document.getElementById('stop');
+const filterBox = document.getElementById('filter');
+const canRun = !runBtn.disabled;
+
+const esc = (s) => String(s === null || s === undefined ? '' : s)
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+// --- what it would cost ---------------------------------------------------------
+// Asked of the server rather than described in prose, because the number depends
+// on the corpus actually loaded and the whole point of showing it is that the
+// operator decides whether to spend it.
+let estimate = null;
+
+async function refreshEstimate() {
+  const mode = modeBox.value;
+  estimateEl.textContent = 'working out what that would cost…';
+  warnEl.hidden = true;
+  try {
+    const res = await fetch(`/api/links/estimate?mode=${mode}` +
+                            `&keep_fragments=${keepBox.checked}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    estimate = await res.json();
+  } catch (err) {
+    estimateEl.textContent = 'could not work out the cost: ' + err;
+    return;
+  }
+  const unit = mode === 'grouped' ? 'window' : 'call';
+  const skipped = Object.entries(estimate.skipped || {})
+    .map(([t, n]) => `${n} ${t} entities left out as not being assertions`)
+    .join('; ');
+  const done = estimate.already_judged
+    ? `, ${estimate.already_judged.toLocaleString()} already judged`
+    : '';
+  estimateEl.textContent =
+    `${estimate.pairs.toLocaleString()} pair(s)${done} — ` +
+    `${estimate.outstanding.toLocaleString()} left to judge in about ` +
+    `${estimate.calls.toLocaleString()} model ${unit}(s) of ${estimate.batch}` +
+    (skipped ? `. ${skipped}.` : '.');
+
+  if (mode === 'exhaustive' && estimate.outstanding > 0) {
+    warnEl.hidden = false;
+    warnEl.textContent =
+      `This compares every pair of every category one pair at a time — ` +
+      `${estimate.outstanding.toLocaleString()} comparisons in about ` +
+      `${estimate.calls.toLocaleString()} model calls. On a local endpoint that ` +
+      `is very likely to take many hours, and possibly far longer. The grouped ` +
+      `mode covers exactly the same pairs in far fewer calls. This can be ` +
+      `stopped at any point and resumed later without repeating work.`;
+  }
+}
+modeBox.addEventListener('change', refreshEstimate);
+keepBox.addEventListener('change', refreshEstimate);
+
+// --- the activity indicator, same as the report page ----------------------------
+const STALLED_AFTER_MS = 120000;
+let runStartedAt = 0, phaseStartedAt = 0, lastEventAt = 0, ticker = null;
+let runEndedAt = null;
+
+function elapsed(ms) {
+  const total = Math.max(0, Math.round(ms / 1000));
+  const h = Math.floor(total / 3600), m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h) return `${h}h${String(m).padStart(2, '0')}m`;
+  if (m) return `${m}m${String(s).padStart(2, '0')}s`;
+  return `${s}s`;
+}
+
+function tick() {
+  const now = Date.now();
+  const quiet = now - lastEventAt;
+  let text = `${elapsed(now - phaseStartedAt)} · ${elapsed(now - runStartedAt)} total`;
+  if (quiet > STALLED_AFTER_MS) text += ` · nothing received for ${elapsed(quiet)}`;
+  elapsedEl.textContent = text;
+  elapsedEl.classList.toggle('stalled', quiet > STALLED_AFTER_MS);
+}
+
+function startActivity(startedAt, live, finishedAt) {
+  const began = startedAt ? Date.parse(startedAt) : NaN;
+  runStartedAt = Number.isNaN(began) ? Date.now() : began;
+  const ended = finishedAt ? Date.parse(finishedAt) : NaN;
+  runEndedAt = Number.isNaN(ended) ? null : ended;
+  phaseStartedAt = lastEventAt = Date.now();
+  spinEl.hidden = !live;
+  elapsedEl.hidden = false;
+  elapsedEl.classList.remove('stalled');
+  tick();
+  if (live) ticker = window.setInterval(tick, 1000);
+}
+
+function stopActivity() {
+  if (ticker) window.clearInterval(ticker);
+  ticker = null;
+  spinEl.hidden = true;
+  elapsedEl.classList.remove('stalled');
+  elapsedEl.textContent =
+    `${elapsed((runEndedAt || Date.now()) - runStartedAt)} total`;
+}
+
+function noteEvent(newPhase) {
+  lastEventAt = Date.now();
+  if (newPhase) phaseStartedAt = lastEventAt;
+  if (ticker) tick();
+}
+
+// --- watching -------------------------------------------------------------------
+// The pass runs on the server, so this page can be closed and reopened while it
+// works. Starting one and picking one up on load go through the same attach().
+let source = null;
+let attachedRunId = null;
+
+function setRunning(live) {
+  runBtn.disabled = live || !canRun;
+  stopBtn.hidden = !live;
+  modeBox.disabled = live;
+  keepBox.disabled = live;
+}
+
+function detach() {
+  if (source) { source.close(); source = null; }
+  attachedRunId = null;
+}
+
+function apply(kind, data) {
+  if (kind === 'status') {
+    noteEvent(true);
+    statusEl.textContent = data;
+  } else if (kind === 'token') {
+    noteEvent(false);
+    out.textContent += data;
+    out.scrollTop = out.scrollHeight;
+  } else if (kind === 'error') {
+    noteEvent(true);
+    out.textContent += '\n' + data + '\n';
+  } else if (kind === 'done') {
+    noteEvent(true);
+    statusEl.textContent =
+      `finished — ${data.links} connection(s) from ${data.judged} pair(s)`;
+  }
+}
+
+function attach(runId, startedAt, live, finishedAt) {
+  detach();
+  attachedRunId = runId;
+  out.hidden = false;
+  out.textContent = '';
+  startActivity(startedAt, live, finishedAt);
+  setRunning(live);
+
+  source = new EventSource(`/api/report/${runId}/events`);
+  for (const kind of ['status', 'token', 'error', 'done']) {
+    source.addEventListener(kind, (ev) => {
+      let data; try { data = JSON.parse(ev.data); } catch { return; }
+      apply(kind, data);
+    });
+  }
+  source.addEventListener('ended', (ev) => {
+    let data; try { data = JSON.parse(ev.data); } catch { data = {}; }
+    if (data.status === 'stopped') statusEl.textContent = 'stopped';
+    runEndedAt = Date.now();
+    detach();
+    stopActivity();
+    setRunning(false);
+    refreshEstimate();
+    refreshFound();
+  });
+  source.onerror = () => {
+    if (source && source.readyState === EventSource.CLOSED) {
+      statusEl.textContent = 'lost track of this pass; it may have been ' +
+                             'stopped by a restart';
+      detach();
+      stopActivity();
+      setRunning(false);
+    }
+  };
+}
+
+runBtn.addEventListener('click', async () => {
+  const mode = modeBox.value;
+  if (mode === 'exhaustive') {
+    const n = estimate ? estimate.outstanding.toLocaleString() : 'every';
+    const calls = estimate ? estimate.calls.toLocaleString() : 'many';
+    if (!confirm(`Compare ${n} pairs one at a time?\n\nThat is about ${calls} ` +
+                 `model calls. On a local model it is very likely to take many ` +
+                 `hours and may take far longer. The grouped mode covers the ` +
+                 `same pairs in far fewer calls.\n\nYou can stop at any point ` +
+                 `and resume later without repeating work.`)) return;
+  }
+  statusEl.textContent = 'starting…';
+  try {
+    const res = await fetch('/api/links', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode, keep_fragments: keepBox.checked,
+                             confirm_exhaustive: mode === 'exhaustive' }),
+    });
+    const body = await res.json().catch(() => null);
+    if (res.status === 409 && body && body.run_id) {
+      statusEl.innerHTML = esc(body.detail) +
+        ' <button type="button" class="btn" id="watch-existing">Watch it</button>';
+      document.getElementById('watch-existing')
+        .addEventListener('click', () => attach(body.run_id, null, true));
+      return;
+    }
+    if (!res.ok) throw new Error((body && body.detail) || `HTTP ${res.status}`);
+    attach(body.run_id, body.started_at, true);
+  } catch (err) {
+    statusEl.textContent = 'failed: ' + err;
+    setRunning(false);
+  }
+});
+
+stopBtn.addEventListener('click', async () => {
+  if (!attachedRunId) return;
+  if (!confirm('Stop this pass? Pairs already judged are kept, so restarting ' +
+               'resumes rather than starting again.')) return;
+  stopBtn.disabled = true;
+  try {
+    const res = await fetch(`/api/report/${attachedRunId}/cancel`,
+                            { method: 'POST' });
+    statusEl.textContent = res.ok ? 'stopping…' : 'could not stop it';
+  } finally {
+    stopBtn.disabled = false;
+  }
+});
+
+// --- the table ------------------------------------------------------------------
+async function refreshFound() {
+  try {
+    const res = await fetch('/api/links/found?limit=400');
+    if (!res.ok) return;
+    const data = await res.json();
+    const rows = data.links.map((l) =>
+      `<tr data-pairing="${esc(l.pairing)}">` +
+      `<td class="small">${esc(l.pairing)}</td><td>${esc(l.a_name)}</td>` +
+      `<td class="small"><span class="tag">${esc(l.relation)}</span></td>` +
+      `<td>${esc(l.b_name)}</td><td class="small">${esc(l.basis)}</td>` +
+      `<td class="small">${(l.confidence || 0).toFixed(2)}</td></tr>`).join('');
+    document.getElementById('found').innerHTML =
+      '<tr><th>Pairing</th><th></th><th>Relation</th><th></th><th>Basis</th>' +
+      '<th>Confidence</th></tr>' + rows;
+  } catch { /* the table just stays as it was */ }
+}
+
+if (filterBox) {
+  filterBox.addEventListener('change', () => {
+    const want = filterBox.value;
+    document.querySelectorAll('#found tr[data-pairing]').forEach((tr) => {
+      tr.hidden = Boolean(want) && tr.dataset.pairing !== want;
+    });
+  });
+}
+
+// On load: what would a run cost, and is one already going?
+refreshEstimate();
+(async function pickUpWhereverItIs() {
+  let body = null;
+  try {
+    const res = await fetch('/api/report/active');
+    if (res.ok) body = await res.json();
+  } catch { return; }
+  if (!body || !body.run_id || body.kind !== 'link pass') return;
+  attach(body.run_id, body.started_at, body.status === 'running',
+         body.finished_at);
+})();
+</script>
+{% endblock %}

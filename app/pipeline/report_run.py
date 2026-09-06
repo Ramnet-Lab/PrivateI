@@ -1,4 +1,8 @@
-"""One report being written, outliving the request that asked for it.
+"""One long job running, outliving the request that asked for it.
+
+Reports were the first of these and named the module; the linking pass is the
+second, and the two are the same shape - minutes to hours of local model work
+that a browser must be able to stop watching without stopping.
 
 Writing a report is many minutes of local model work.  Run inside the request
 that asked for it, it belongs to the browser: a refresh, a closed tab or a shut
@@ -11,14 +15,20 @@ Watching can stop and start as often as the operator likes; the work does not
 notice.  What a watcher needs is everything emitted so far and then everything
 emitted from now on, which is what the entry buffer and follow() are.
 
-This module knows nothing about reports.  It is handed a producer - anything
-that yields (kind, data) pairs - so that what a report *is* stays in one place
-and this stays a thing that runs a producer and remembers what it said.
+This module knows nothing about the work.  It is handed a producer - anything
+that takes the Run and yields (kind, data) pairs - so that what the work *is*
+stays in one place and this stays a thing that runs a producer and remembers
+what it said.  The producer is given the Run because a job that stamps its own
+name on what it writes needs the run_id, and reading it back off a box the
+caller filled in afterwards is a race with the thread started here.
 
 One run at a time, for the same reason the document worker is one thread: the
-passes hit the same GPU, and two reports at once make both slower rather than
-either faster.  A second request is refused rather than queued, because each
-run is a full report and an operator who clicked twice did not ask for two.
+passes hit the same GPU, and two at once make both slower rather than either
+faster.  That one slot is shared across kinds, so a linking pass and a report
+exclude each other rather than fighting over the endpoint, and Busy names
+whichever is actually running.  A second request is refused rather than queued,
+because each run is hours of work and an operator who clicked twice did not ask
+for two.
 
 Nothing here is persisted.  A run dies with the process, and there is no
 half-written report to resume from - unlike a document, whose durable truth is
@@ -54,11 +64,12 @@ RUNNING = "running"
 
 
 class Busy(RuntimeError):
-    """A run is already in flight.  Carries the run_id of the one that is."""
+    """A run is already in flight.  Carries what it is and which run it is."""
 
-    def __init__(self, run_id: str) -> None:
-        super().__init__(f"a report is already being written ({run_id})")
+    def __init__(self, run_id: str, kind: str = "report") -> None:
+        super().__init__(f"a {kind} is already running ({run_id})")
         self.run_id = run_id
+        self.kind = kind
 
 
 class Run:
@@ -73,16 +84,19 @@ class Run:
     is where the saving was wanted anyway.
     """
 
-    __slots__ = ("run_id", "started_at", "finished_at", "token", "status",
-                 "error", "_entries", "_chars", "_truncated", "_cond")
+    __slots__ = ("run_id", "kind", "started_at", "finished_at", "token",
+                 "status", "error", "_entries", "_chars", "_truncated", "_cond")
 
-    def __init__(self, run_id: str) -> None:
+    def __init__(self, run_id: str, kind: str = "report") -> None:
         self.run_id = run_id
+        # What this run is, so a page attaching to one it did not start can say
+        # what it is watching, and so Busy can name it.
+        self.kind = kind
         self.started_at = utcnow()
         self.finished_at: str | None = None
         # The run names the token, so a call abandoned deep in the pipeline
         # still says in its message which run it belonged to.
-        self.token = CancelToken(f"report {run_id}",
+        self.token = CancelToken(f"{kind} {run_id}",
                                  reason="the operator stopped it")
         self.status = RUNNING
         self.error: str | None = None
@@ -137,7 +151,8 @@ class Run:
 
     def snapshot(self) -> dict:
         with self._cond:
-            return {"run_id": self.run_id, "status": self.status,
+            return {"run_id": self.run_id, "kind": self.kind,
+                    "status": self.status,
                     "started_at": self.started_at,
                     "finished_at": self.finished_at,
                     "error": self.error, "entries": len(self._entries)}
@@ -177,13 +192,14 @@ _current: Run | None = None
 _lock = threading.Lock()
 
 
-def start(producer: Callable[[], Iterable[tuple[str, Any]]]) -> Run:
+def start(producer: Callable[["Run"], Iterable[tuple[str, Any]]],
+          kind: str = "report") -> Run:
     """Begin a run on its own thread.  Raises Busy if one is already going."""
     global _current
     with _lock:
         if _current is not None and _current.status == RUNNING:
-            raise Busy(_current.run_id)
-        run = Run(secrets.token_hex(8))
+            raise Busy(_current.run_id, _current.kind)
+        run = Run(secrets.token_hex(8), kind)
         _current = run
 
     def work() -> None:
@@ -192,31 +208,31 @@ def start(producer: Callable[[], Iterable[tuple[str, Any]]]) -> Run:
         # is how those calls find out whose run they are making.
         with cancellation_scope(run.token):
             try:
-                for kind, data in producer():
+                for kind, data in producer(run):
                     run.append(kind, data)
             except Cancelled as exc:
                 # Not an Exception, deliberately, so the bare "except Exception"
                 # around each model call in the report passes stands aside for
                 # it rather than filing an abort as one more failed draw.
-                log.info("run %s stopped: %s", run.run_id, exc)
+                log.info("%s run %s stopped: %s", run.kind, run.run_id, exc)
                 run._settle("stopped", str(exc))
                 return
             except Exception as exc:
-                log.error("run %s failed: %s", run.run_id, exc)
+                log.error("%s run %s failed: %s", run.kind, run.run_id, exc)
                 run.append("error", str(exc).splitlines()[0] or str(exc))
                 run._settle("failed", str(exc))
                 return
             run._settle("done")
-            log.info("run %s finished", run.run_id)
+            log.info("%s run %s finished", run.kind, run.run_id)
 
-    threading.Thread(target=work, name=f"report-{run.run_id}",
+    threading.Thread(target=work, name=f"{kind}-{run.run_id}",
                      daemon=True).start()
-    log.info("run %s started", run.run_id)
+    log.info("%s run %s started", kind, run.run_id)
     return run
 
 
 def active() -> Run | None:
-    """The run being written right now, or None."""
+    """The run going right now, whatever kind it is, or None."""
     with _lock:
         if _current is not None and _current.status == RUNNING:
             return _current

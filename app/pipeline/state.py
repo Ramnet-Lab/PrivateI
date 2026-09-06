@@ -117,6 +117,45 @@ CREATE TABLE IF NOT EXISTS entities (
     mention_count  INTEGER NOT NULL DEFAULT 0,
     first_seen     TEXT NOT NULL
 );
+
+-- What a comparison of two entities concluded. Extraction reads one page at a
+-- time and never compares two assertions, so nothing in the pipeline can say
+-- that what one witness described in March is what another described in June.
+-- The linking pass says it, and says it here.
+--
+-- These rows are inference, not testimony. Nothing in this table came out of a
+-- document; every row is a model's reading of two things that did. That is why
+-- basis is NOT NULL for a recorded relation - a link that cannot say in the
+-- entities' own words why it exists is not recorded at all - and why the graph
+-- edges written from these rows carry no triple_id, which is what keeps them
+-- out of every existing evidence path.
+--
+-- The key is the pair, in sorted order, so one pair is one row and a re-run
+-- updates rather than duplicates. That is also what makes a stopped run
+-- resumable: a pair with a row here has been judged and is never asked again.
+-- relation='' is a real answer, meaning judged and unrelated, and is stored for
+-- exactly that reason - without it a resumed run would re-ask every pair that
+-- turned out to be nothing, which on an exhaustive run is nearly all of them.
+--
+-- subject_id names which side is the subject when the relation has a direction
+-- ("reports to", "caused"), and is NULL when it does not ("same occurrence").
+-- Storing direction beside a sorted key keeps one row per pair without
+-- flattening "A reports to B" into "A and B are related somehow".
+CREATE TABLE IF NOT EXISTS entity_links (
+    a_id       TEXT NOT NULL,
+    b_id       TEXT NOT NULL,
+    pairing    TEXT NOT NULL,
+    relation   TEXT NOT NULL,
+    subject_id TEXT,
+    confidence REAL,
+    basis      TEXT,
+    model      TEXT,
+    run_id     TEXT,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (a_id, b_id)
+);
+CREATE INDEX IF NOT EXISTS entity_links_found
+    ON entity_links(pairing, relation);
 """
 
 

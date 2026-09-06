@@ -26,9 +26,9 @@ from fastapi.templating import Jinja2Templates
 APP_DIR = Path(os.environ.get("APP_DIR", "/app"))
 sys.path.insert(0, str(APP_DIR))
 
-from pipeline import (chat, consensus, embed, graph, llm_settings,  # noqa: E402
-                      model_client, paths, report, report_run, runner,
-                      state)
+from pipeline import (chat, consensus, embed, graph, links,  # noqa: E402
+                      llm_settings, model_client, paths, report,
+                      report_run, runner, state)
 from pipeline.log import get_logger, utcnow               # noqa: E402
 
 log = get_logger("app")
@@ -63,6 +63,11 @@ def _counts() -> dict:
         "pages": n("SELECT COUNT(*) AS n FROM pages"),
         "assertions": n("SELECT COUNT(*) AS n FROM triples"),
         "entities": n("SELECT COUNT(*) AS n FROM entities WHERE merged_into IS NULL"),
+        # Counted separately from assertions and never added to them: an
+        # assertion came out of a document and a link is a reading of two that
+        # did, and one number covering both would be a claim that they are the
+        # same kind of thing.
+        "links": n("SELECT COUNT(*) AS n FROM entity_links WHERE relation <> ''"),
     }
 
 
@@ -369,7 +374,7 @@ def api_report(payload: dict):
 
     try:
         run = report_run.start(
-            lambda: _report_runs(goal, allegations, runs, allow_incomplete))
+            lambda _run: _report_runs(goal, allegations, runs, allow_incomplete))
     except report_run.Busy as busy:
         # Refused rather than queued. Each run is a full report - minutes of
         # model time per allegation - so a second one is never what a double
@@ -431,6 +436,92 @@ def api_report_cancel(run_id: str):
         raise HTTPException(status_code=409,
                             detail="that report is not running")
     return JSONResponse({"stopping": True})
+
+
+# grouped compares every pair too - it just stops writing each entity out once
+# per pair, which is where the cost was. exhaustive is the same coverage asked
+# one pair at a time, kept because a pair judged on its own is judged with the
+# model's whole attention on it.
+MODES = ("grouped", "connected", "exhaustive")
+
+
+@app.get("/links", response_class=HTMLResponse)
+def links_page(request: Request):
+    return templates.TemplateResponse(request, "links.html", {
+        "c": _counts(), "summary": links.summary(),
+        "pairings": sorted(links.PAIRINGS),
+        "found": links.found(limit=400),
+        "chat_model": llm_settings.effective_text_model(),
+    })
+
+
+@app.get("/api/links/estimate")
+def api_links_estimate(mode: str = "grouped", keep_fragments: bool = False):
+    """What a run would cost, before anyone commits to it.
+
+    Exhaustive over a corpus of any size is hours, and the operator is the one
+    who decides whether to spend them - so the number is computed from the
+    corpus actually loaded and shown, rather than described in the abstract.
+    """
+    if mode not in MODES:
+        raise HTTPException(status_code=400,
+                            detail=f"mode must be one of {', '.join(MODES)}")
+    return JSONResponse(links.estimate(mode, keep_fragments))
+
+
+@app.post("/api/links")
+def api_links(payload: dict):
+    mode = str(payload.get("mode") or "grouped")
+    if mode not in MODES:
+        raise HTTPException(status_code=400,
+                            detail=f"mode must be one of {', '.join(MODES)}")
+    wanted = payload.get("pairings") or None
+    if wanted is not None and not isinstance(wanted, list):
+        raise HTTPException(status_code=400, detail="pairings must be a list")
+    if wanted:
+        unknown = [w for w in wanted if w not in links.PAIRINGS]
+        if unknown:
+            raise HTTPException(status_code=400,
+                                detail=f"no such pairing: {', '.join(unknown)}")
+    keep_fragments = bool(payload.get("keep_fragments"))
+
+    # An exhaustive run is confirmed by name, the way a purge is. It is not
+    # destructive, but it is hours of the machine committed by one click, and
+    # the number it is confirmed against is the number the page just showed.
+    if mode == "exhaustive" and not payload.get("confirm_exhaustive"):
+        raise HTTPException(
+            status_code=400,
+            detail="an exhaustive run compares every pair of every category "
+                   "and can take many hours; confirm it explicitly")
+
+    try:
+        run = report_run.start(
+            lambda job: links.run(mode, wanted, keep_fragments, job.run_id),
+            kind="link pass")
+    except report_run.Busy as busy:
+        return JSONResponse(status_code=409, content={
+            "detail": f"a {busy.kind} is already running; watch that one "
+                      f"rather than starting a second",
+            "run_id": busy.run_id})
+    return JSONResponse({"run_id": run.run_id, "started_at": run.started_at})
+
+
+@app.get("/api/links/found")
+def api_links_found(pairing: str | None = None, limit: int = 400):
+    return JSONResponse({"links": links.found(pairing, limit),
+                         "summary": links.summary()})
+
+
+@app.get("/api/graph/inferred")
+def api_graph_inferred():
+    """The inferred edges, asked for by name.
+
+    Separate from /api/graph on purpose: that route answers what the record
+    says, and its answer must not change because a pass has been run over it.
+    """
+    if not graph.available():
+        return JSONResponse({"edges": [], "error": "graph unavailable"})
+    return JSONResponse({"edges": graph.inferred_edges()})
 
 
 @app.get("/reports/{report_id}", response_class=PlainTextResponse)
@@ -650,6 +741,12 @@ def delete_document(doc_id: str):
     if not doc:
         raise HTTPException(status_code=404, detail="document not found")
 
+    # Before the graph work, not after. Entity links are inference drawn over the
+    # corpus as it was, so a document leaving makes all of them suspect - and an
+    # inferred edge is still an edge, so one left in place would hold a dead
+    # entity out of the orphan sweep below.
+    links.clear()
+
     if graph.available():
         with graph.driver().session() as session:
             session.run("""MATCH ()-[r]->() WHERE r.source_doc = $doc DELETE r""",
@@ -683,6 +780,12 @@ def _reset_document(doc_id: str) -> None:
     what makes a prompt change or an OCR fix actually reach existing documents
     instead of only new ones. The uploaded file itself is never touched.
     """
+    # Before the graph work, not after. Entity links are inference drawn over the
+    # corpus as it was, so a document leaving makes all of them suspect - and an
+    # inferred edge is still an edge, so one left in place would hold a dead
+    # entity out of the orphan sweep below.
+    links.clear()
+
     if graph.available():
         with graph.driver().session() as session:
             session.run("MATCH ()-[r]->() WHERE r.source_doc = $doc DELETE r",
@@ -747,6 +850,9 @@ def reingest_all():
             _reset_document(row["doc_id"])
         with state.tx() as conn:
             conn.execute("DELETE FROM entities")
+        # Entity ids are rebuilt from scratch here, so every stored pair key
+        # refers to something that no longer exists under that name.
+        links.clear()
         for row in docs:
             runner.enqueue(row["doc_id"], force=True)
     log.info("re-ingesting all %d document(s)%s", len(docs),
@@ -998,6 +1104,10 @@ def api_purge(payload: dict):
                 # emptied; deleting them outright says so directly and cannot
                 # leave a stale name behind if that reading ever changes.
                 rows["entities"] = conn.execute("DELETE FROM entities").rowcount
+                # The graph edges go with the DETACH DELETE above; these rows
+                # are the authority the edges were drawn from and are separate.
+                rows["entity_links"] = conn.execute(
+                    "DELETE FROM entity_links").rowcount
 
             # The passage vectors live in the chunks rows just deleted, and
             # the search matrix is a cached copy of them held in memory. It
