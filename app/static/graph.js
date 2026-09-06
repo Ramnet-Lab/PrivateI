@@ -16,6 +16,18 @@ let allNodes = [], allEdges = [], inferredEdges = [];
 // ran a pass over it - so they are a second request, drawn differently, and the
 // page looks exactly as it did before this existed until the box is ticked.
 const INFERRED_COLOR = '#c264d6';
+const EDGE_COLOR = '#3a4150';
+const LIT_EDGE = '#7a869c';   // an evidence edge with focus on it
+
+// Focusing a node. At 288 entities and nearly a thousand edges the whole graph
+// is a hairball, and the only way to read one entity's neighbourhood is to push
+// everything else back rather than to hunt for it. Dimmed rather than hidden:
+// removing nodes would restabilise the physics and move the very thing being
+// looked at out from under the cursor.
+const DIM_NODE = 0.06;
+const DIM_LABEL = 'rgba(230, 232, 236, 0.05)';
+const DIM_EDGE = 'rgba(58, 65, 80, 0.05)';
+let nodeSet = null, edgeSet = null, focused = null;
 
 function nodeSize(degree) {
   return 12 + Math.min(26, Math.sqrt(degree || 1) * 7);
@@ -49,6 +61,10 @@ async function load() {
     from: e.source,
     to: e.target,
     label: e.predicate,
+    // Stated rather than left to the global style, because focusing dims every
+    // edge and then has to put each one back the way it was.
+    color: { color: EDGE_COLOR, highlight: '#4a9eff' },
+    font: { color: '#939aa8' },
     title: `${e.predicate}\n${e.source_file || e.source_doc} page ${e.source_page}\n“${(e.quote || '').slice(0, 200)}”`,
   }));
 
@@ -75,8 +91,9 @@ async function loadInferred() {
     label: e.relation,
     dashes: true,
     width: 1,
-    color: { color: INFERRED_COLOR, opacity: 0.75 },
+    color: { color: INFERRED_COLOR, opacity: 0.75, highlight: '#e0a0f0' },
     font: { color: INFERRED_COLOR, size: 11 },
+    inferredColor: true,
     title: `inferred — not stated in any document\n${e.relation}` +
            ` (confidence ${(e.confidence || 0).toFixed(2)})\n${e.basis || ''}`,
     inferred: true,
@@ -94,8 +111,9 @@ async function loadInferred() {
 
 function draw(nodes, edges) {
   const container = document.getElementById('net');
-  const nodeSet = new vis.DataSet(nodes);
-  const edgeSet = new vis.DataSet(edges);
+  focused = null;
+  nodeSet = new vis.DataSet(nodes);
+  edgeSet = new vis.DataSet(edges);
   network = new vis.Network(container, { nodes: nodeSet, edges: edgeSet }, {
     physics: {
       solver: 'forceAtlas2Based',
@@ -111,9 +129,78 @@ function draw(nodes, edges) {
       smooth: { type: 'continuous' },
     },
   });
+  // A pan is a click as far as the canvas is concerned - press, move, release,
+  // and vis reports a click on empty space at the end of it. Releasing the
+  // focus on that makes a focused neighbourhood impossible to move around,
+  // which is the main thing anyone wants to do with one. So a drag is
+  // remembered and the click that ends it is not treated as a click.
+  let dragged = false;
+  network.on('dragStart', () => { dragged = false; });
+  network.on('dragging', () => { dragged = true; });
+
   network.on('click', params => {
-    if (params.nodes.length) showEntity(params.nodes[0]);
+    if (params.nodes.length) {
+      focus(params.nodes[0]);
+      showEntity(params.nodes[0]);
+      dragged = false;
+      return;
+    }
+    if (dragged) {
+      dragged = false;      // the graph was moved, not dismissed
+      return;
+    }
+    // A real click on empty space puts the whole graph back. Clicking an edge
+    // counts as empty: the pair it joins is already lit by whichever end was
+    // focused.
+    focus(null);
   });
+}
+
+// Bring one node and everything it touches forward, and push the rest back until
+// the next click. Called with null to restore.
+function focus(id) {
+  if (!nodeSet || !edgeSet) return;
+  focused = id;
+  const edges = edgeSet.get();
+
+  if (id === null) {
+    nodeSet.update(nodeSet.get().map(n => ({
+      id: n.id, opacity: 1, font: { color: '#e6e8ec' },
+    })));
+    edgeSet.update(edges.map(e => ({
+      id: e.id,
+      color: e.inferredColor
+        ? { color: INFERRED_COLOR, opacity: 0.75, highlight: '#e0a0f0' }
+        : { color: EDGE_COLOR, highlight: '#4a9eff' },
+      font: { color: e.inferredColor ? INFERRED_COLOR : '#939aa8' },
+    })));
+    return;
+  }
+
+  const near = new Set([id]);
+  const touching = new Set();
+  for (const e of edges) {
+    if (e.from === id || e.to === id) {
+      touching.add(e.id);
+      near.add(e.from);
+      near.add(e.to);
+    }
+  }
+  nodeSet.update(nodeSet.get().map(n => ({
+    id: n.id,
+    opacity: near.has(n.id) ? 1 : DIM_NODE,
+    font: { color: near.has(n.id) ? '#e6e8ec' : DIM_LABEL },
+  })));
+  edgeSet.update(edges.map(e => ({
+    id: e.id,
+    color: touching.has(e.id)
+      ? (e.inferredColor
+          ? { color: INFERRED_COLOR, opacity: 1, highlight: '#e0a0f0' }
+          : { color: LIT_EDGE, highlight: '#4a9eff' })
+      : { color: DIM_EDGE, opacity: 0.05 },
+    font: { color: touching.has(e.id)
+      ? (e.inferredColor ? INFERRED_COLOR : '#c3c9d4') : DIM_LABEL },
+  })));
 }
 
 async function showEntity(id) {
@@ -172,6 +259,11 @@ function applyFilters() {
 document.getElementById('search').addEventListener('input', debounce(applyFilters, 250));
 document.getElementById('typeFilter').addEventListener('change', applyFilters);
 document.getElementById('showInferred').addEventListener('change', applyFilters);
+// A second way out of a focus, for anyone who does not want to hunt for empty
+// canvas in a graph this dense.
+document.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Escape' && focused !== null) focus(null);
+});
 document.getElementById('refit').addEventListener('click', () => network && network.fit());
 
 function debounce(fn, ms) {

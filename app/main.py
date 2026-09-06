@@ -37,6 +37,31 @@ app = FastAPI(title="Document Analysis", docs_url=None, redoc_url=None)
 app.mount("/static", StaticFiles(directory=str(APP_DIR / "static")), name="static")
 templates = Jinja2Templates(directory=str(APP_DIR / "templates"))
 
+
+def _asset_version() -> str:
+    """A token that changes whenever a static file does.
+
+    StaticFiles sends an etag and a last-modified and no cache-control, which
+    leaves a browser free to decide for itself how long to reuse a file without
+    asking. It does, and the result is a page running last week's javascript
+    against this week's markup with nothing on screen to say so - which is a
+    genuinely hard bug to see, because the server is serving the right file and
+    the page is running the wrong one. Stamping the mtime into the URL makes a
+    changed file a different URL, which no cache can get wrong.
+    """
+    try:
+        newest = max(f.stat().st_mtime for f in (APP_DIR / "static").iterdir()
+                     if f.is_file())
+        return str(int(newest))
+    except (OSError, ValueError):
+        return "0"
+
+
+# A Jinja global rather than a value in each route's context: a static file
+# added to one page and forgotten in another is exactly the bug this exists to
+# prevent, so no route gets the chance to leave it out.
+templates.env.globals["asset_version"] = _asset_version()
+
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_MB", "500")) * 1024 * 1024
 
 
