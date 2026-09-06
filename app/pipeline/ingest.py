@@ -37,6 +37,48 @@ def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+# The tags a camera writes and a scanner, a screenshot and an export do not.
+# Make and Model sit in the main directory; the rest live in the Exif sub-IFD.
+_CAMERA_TAGS_MAIN = (271, 272)                                   # Make, Model
+_CAMERA_TAGS_EXIF = (33434, 33437, 34855, 36867, 37386, 42036)   # exposure,
+# aperture, ISO, original date, focal length, lens
+
+
+def looks_photographed(src: Path) -> bool:
+    """Whether a camera made this file - asked of the file, not guessed.
+
+    This decides which of the two normalisation paths a page takes, and it
+    used to be guessed: an uploaded image file was called a photograph because
+    a scan saved as a JPEG and a phone picture of the same page are the same
+    file type. That reasoning held only as long as the photograph path could
+    not hurt a flat page, and it can. Page-finding is a test of shape, and a
+    ruled box printed on a form is the same shape as a sheet of paper; a scan
+    that went down the photograph path could be cropped to its own table,
+    losing the letterhead above it and the footer below, with what remained
+    still reading well enough that OCR raised no objection.
+
+    So it is asked rather than assumed. A phone writes its make, its model and
+    its exposure into the file; a flatbed, a screenshot and a PDF export do
+    not. A photograph whose tags have been stripped is read as a scan and
+    simply gets the treatment it got before any of this existed, which is the
+    safe way round: the cost of guessing "scan" is a crop not made, and the
+    cost of guessing "photograph" is a page cut in half.
+    """
+    try:
+        with Image.open(src) as im:
+            exif = im.getexif()
+            if not exif:
+                return False
+            if any(str(exif.get(tag) or "").strip() for tag in _CAMERA_TAGS_MAIN):
+                return True
+            sub = exif.get_ifd(0x8769)
+            return any(sub.get(tag) not in (None, "") for tag in _CAMERA_TAGS_EXIF)
+    except Exception as exc:                     # unreadable metadata is not fatal
+        log.warning("%s: could not read the image metadata (%s); "
+                    "treating it as a scan", src.name, exc)
+        return False
+
+
 def load_upright(src: Path) -> np.ndarray:
     """Decode an image file the way it was meant to be looked at.
 
@@ -178,13 +220,11 @@ def ingest_docx(src: Path, doc_id: str, on_progress) -> int:
 def ingest_image(src: Path, doc_id: str, on_progress) -> int:
     on_progress("normalising image")
     arr = load_upright(src)
-    # An uploaded image file is a photograph until proved otherwise, and there
-    # is no proving it: a flatbed scan saved as a JPEG and a phone picture of
-    # the same page are the same file type. The photograph path is written to
-    # cost nothing on a page that turns out to be flat - it looks for an
-    # outline, finds none inside a scan's own borders, and leaves the frame
-    # alone - so guessing "photograph" is the guess that is cheap when wrong.
-    dest = write_page_image(doc_id, 1, arr, photo=True)
+    photo = looks_photographed(src)
+    log.info("%s: %s", src.name,
+             "a camera made this file, so it takes the photograph path"
+             if photo else "no camera metadata, so it is normalised as a scan")
+    dest = write_page_image(doc_id, 1, arr, photo=photo)
     with state.tx() as conn:
         _record_page(conn, doc_id, 1, image=dest)
     return 1

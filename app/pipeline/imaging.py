@@ -57,6 +57,9 @@ PAGE_MIN_ASPECT = 0.35      # no paper is this long and thin
 PAGE_MAX_ASPECT = 2.9
 PAGE_MIN_SIDE_RATIO = 0.6   # opposite sides of a page are roughly equal
 PAGE_MAX_CORNER_SKEW = 40.0  # degrees a corner may sit away from square
+# What lies outside the sheet must be darker than the sheet, by this much, for
+# the outline to be a sheet's edge at all. See _surround_is_darker.
+SURROUND_MAX_BRIGHTNESS = 0.8
 
 # --- dividing out the lighting ---------------------------------------------
 FLATTEN_LONG_EDGE = 800     # the lighting is low-frequency; estimate it small
@@ -202,6 +205,37 @@ def _is_plausible_page(quad: np.ndarray, frame_area: float) -> bool:
     return True
 
 
+def _surround_is_darker(gray: np.ndarray, quad: np.ndarray) -> bool:
+    """Whether what lies outside the outline is something other than the page.
+
+    Every test above this one is a test of shape, and shape cannot tell a
+    sheet of paper from a box printed on one. A table, a ruled form panel, a
+    bordered block: each is a convex rectangle of ordinary proportions with
+    square corners, and each passes all of them. Cropping to one throws away
+    the letterhead above it and the footer below, and the remainder still
+    reads well enough that OCR accepts it, so nothing downstream ever objects
+    - which makes this the one failure here that destroys evidence quietly.
+
+    What a printed box cannot do is change what surrounds it. Outside a box on
+    a page there is more of the same page; outside a photographed sheet there
+    is a desk, a table or a floor, and those are darker than paper. So the
+    exterior is measured against the interior, and an exterior as bright as
+    what it encloses means the rectangle was drawn on the page rather than
+    being its edge.
+
+    Refusing is the safe answer when the two are close, and it is what an
+    evenly lit page of white paper on a white surface will get. That costs a
+    crop. Accepting would cost the page.
+    """
+    mask = np.zeros(gray.shape[:2], np.uint8)
+    cv2.fillConvexPoly(mask, quad.astype(np.int32), 255)
+    inside = gray[mask > 0]
+    outside = gray[mask == 0]
+    if inside.size < 100 or outside.size < 100:
+        return False
+    return float(np.median(outside)) <= float(np.median(inside)) * SURROUND_MAX_BRIGHTNESS
+
+
 def _page_masks(gray: np.ndarray) -> list[np.ndarray]:
     """Two ways of seeing the sheet, because one of them is often wrong.
 
@@ -257,6 +291,8 @@ def find_page(image: np.ndarray) -> np.ndarray | None:
             quad = _order_quad(approx)
             if not _is_plausible_page(quad, frame_area):
                 continue
+            if not _surround_is_darker(gray, quad):
+                continue
             area = float(cv2.contourArea(quad))
             if area > best_area:
                 best, best_area = quad, area
@@ -264,7 +300,7 @@ def find_page(image: np.ndarray) -> np.ndarray | None:
     return None if best is None else best / scale
 
 
-def warp_page(image: np.ndarray, quad: np.ndarray) -> np.ndarray:
+def warp_page(image: np.ndarray, quad: np.ndarray) -> np.ndarray | None:
     """Flatten the sheet onto a rectangle the size of its longest edges.
 
     Sized by the longest opposite pair rather than an average, so the near edge
@@ -276,7 +312,10 @@ def warp_page(image: np.ndarray, quad: np.ndarray) -> np.ndarray:
     width = int(round(max(top, bottom)))
     height = int(round(max(left, right)))
     if width < MIN_DIM or height < MIN_DIM:
-        return image
+        # None rather than the original, so the caller says "no page found"
+        # instead of logging that it found and flattened one while handing
+        # back the frame it started with.
+        return None
     target = np.array([[0, 0], [width - 1, 0],
                        [width - 1, height - 1], [0, height - 1]], dtype=np.float32)
     matrix = cv2.getPerspectiveTransform(quad, target)
@@ -352,11 +391,11 @@ def normalize(image: np.ndarray, *, photo: bool = False) -> tuple[np.ndarray, di
     meta: dict = {"photo": photo, "page_found": None}
     if photo:
         quad = find_page(image)
-        meta["page_found"] = quad is not None
-        if quad is not None:
-            before = image.shape[:2]
-            image = warp_page(image, quad)
-            meta["cropped_from"] = f"{before[1]}x{before[0]}"
+        warped = None if quad is None else warp_page(image, quad)
+        meta["page_found"] = warped is not None
+        if warped is not None:
+            meta["cropped_from"] = f"{image.shape[1]}x{image.shape[0]}"
+            image = warped
         image = flatten_illumination(image)
 
     out, angle = deskew(image)
