@@ -14,26 +14,16 @@ log = get_logger("transcribe")
 
 
 def _client() -> Ollama:
-    """The client transcription talks to, wherever the operator put vision.
+    """The same endpoint the text model uses.
 
-    Local is the default and is the branch that must not change: a bare client
-    with allow_override=False is the chain this stage has always followed - the
-    environment, then the built-in runner, unix socket included - and nothing
-    stored can substitute an endpoint underneath it.
-
-    External names its endpoint, key and dialect explicitly and passes
-    allow_override=False for the same reason, from the other direction: the
-    address must be the one the operator chose for vision, not whatever the
-    text model happens to be pointed at when a document arrives. It says
-    from_settings so that an error about a model this endpoint does not serve
-    sends the operator to the page they chose it on, rather than to MODEL_URL,
-    which they have never set.
+    Vision has no configuration of its own. An operator who points this
+    deployment at their own server means all of it, and a second address to
+    keep in step was one more thing to get wrong: the text model moved, the
+    vision one did not, and transcription failed naming a variable nobody had
+    set. A bare client resolves the operator's endpoint, key and dialect when
+    one is configured, and the built-in runner with its socket when it is not.
     """
-    if not llm_settings.is_vision_external():
-        return Ollama(allow_override=False)
-    url, key, flavor = llm_settings.vision_client_override()
-    return Ollama(url=url, api_key=key, allow_override=False, flavor=flavor,
-                  from_settings=True)
+    return Ollama()
 
 
 def _require_vision(client: Ollama, model: str, on_progress) -> None:
@@ -91,10 +81,15 @@ def run(doc_id: str, on_progress) -> int:
     # endpoint came from, and the answer here depends on neither: it is the
     # settings page in both scopes, and what it stops is scans and photographs
     # rather than the document.
-    model = llm_settings.effective_vision_model()
+    # The same model the rest of the pipeline uses. Whether it can read an
+    # image is asked of the endpoint below rather than configured here.
+    model = llm_settings.effective_text_model()
     if not model:
-        raise ModelNotSet(llm_settings.vision_missing_message())
-    model = client.require_model(model, llm_settings.vision_model_label())
+        raise ModelNotSet(
+            "No model is set, so page images cannot be read. Choose one on "
+            "the settings page. This stops scans and photographs only - a "
+            "document whose text extracts directly never reaches this stage.")
+    model = client.require_model(model, "the model on the settings page")
     _require_vision(client, model, on_progress)
     options = default_options("VLM_TEMPERATURE", "VLM_NUM_CTX",
                               "TRANSCRIBE_NUM_PREDICT", 2000)

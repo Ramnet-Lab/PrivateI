@@ -66,9 +66,8 @@
     endpoint is in force.</strong> That means document passages, the facts extracted
     from them, and the investigation's allegations are sent to whatever endpoint
     is configured here. Embeddings are never sent there: they always run against
-    the local model runner, whatever this page is set to. Transcription does not
-    follow this choice either way: it needs a vision model of its own, and where
-    that one runs is chosen separately under Reading images below.
+    the local model runner, whatever this page is set to. Transcription follows this choice too: page images are read by the same
+    model, at the same endpoint.
   </p>
 
   <p class="note small" id="external-ignored" {% if cfg.is_external %}hidden{% endif %}>
@@ -152,118 +151,11 @@
   answered, so a green line cannot be read as a test of the other one. It
   tests what is saved and not what is typed, so save before testing a change.
   Clearing removes the endpoint, model name, key and Ollama tick from the
-  settings table and returns to the prepackaged local model. It leaves the
-  vision settings below alone &mdash; but a vision model pointed at the endpoint
-  being cleared has nowhere left to run, so move it back to the local runner.
+  settings table and returns to the prepackaged local model.
 </p>
 
 <div id="test-out"></div>
 
-<h1 style="margin-top: 36px">Reading images</h1>
-
-{# Vision is a different model, and it may live somewhere different, so it gets
-   its own banner rather than a clause in the text model's. An operator who
-   pointed the text model at their own server and read "in force: an external
-   endpoint" had every reason to believe transcription had moved with it. It had
-   not, and the error that eventually surfaced named an environment variable
-   they had never set. #}
-{% if not vision.model.value %}
-<p class="notice" id="vision-in-force">
-  <strong>In force: nothing will read images.</strong>
-  No vision model is set, so a scanned or photographed page cannot be
-  transcribed and is left unread.
-</p>
-{% elif cfg.is_vision_external %}
-<p class="notice {% if not cfg.stored_url %}bad{% endif %}" id="vision-in-force">
-  <strong>In force: an external endpoint reads images.</strong>
-  {{ vision.model.value }} at {{ cfg.stored_url or 'no address saved' }}.
-  {% if cfg.stored_url %}
-  Page images are sent there.
-  {% else %}
-  Every page image fails until an endpoint address is saved under Text model
-  above, because that is the address this choice points at.
-  {% endif %}
-</p>
-{% else %}
-<p class="notice ok" id="vision-in-force">
-  <strong>In force: the built-in local runner reads images.</strong>
-  {{ vision.model.value }} &mdash;
-  <span class="tag">{{ vision.model.source }}</span>.
-  Page images stay on this machine.
-</p>
-{% endif %}
-
-{# Worth a line of its own, because the alternative is an operator configuring
-   a model they will never call. A vision model is reached only from the
-   transcription pass, and that pass is reached only by a page OCR could not
-   read. #}
-<p class="small">
-  A vision model is used for one thing: reading a page that could not be read
-  any other way &mdash; a scan or a photograph. A PDF whose text extracts
-  directly never reaches this stage, so if every document loaded here carries
-  its own text there is nothing to set below.
-</p>
-
-<h2>Which model reads images</h2>
-
-<p class="row">
-  <label><input type="radio" name="vision_mode" value="local" id="vision-local"
-                {% if not cfg.is_vision_external %}checked{% endif %}>
-    <strong>The built-in local runner</strong></label>
-</p>
-<p class="small" style="margin: 0 0 12px 22px">
-  Page images are read on this machine and nothing about them leaves it. This
-  is what the pipeline did before this setting existed, and it is the safe
-  answer for case material.
-</p>
-
-<p class="row">
-  <label><input type="radio" name="vision_mode" value="external" id="vision-external"
-                {% if cfg.is_vision_external %}checked{% endif %}>
-    <strong>The same external endpoint as the text model</strong></label>
-</p>
-<p class="small" style="margin: 0 0 12px 22px">
-  The address, key and dialect saved under Text model above. There is no second
-  address here on purpose: one endpoint serving both models is the arrangement
-  this page can describe honestly, and a third address would have to carry its
-  own key and its own dialect to mean anything.
-</p>
-
-<p class="warn" id="vision-warning" {% if not cfg.is_vision_external %}hidden{% endif %}>
-  <strong>Page images leave this machine while the external endpoint reads
-  them.</strong> A page image is the rawest case material there is: the whole
-  page as it was scanned or photographed &mdash; letterhead, signatures,
-  handwriting in the margin &mdash; and not the passage an extraction pass would
-  have quoted from it. It is sent to whatever endpoint is configured above.
-</p>
-
-{# The name box is usable in both modes, unlike the text model's, because the
-   local runner needs a vision model named too - there is no prepackaged one
-   this page could fall back to. #}
-<label class="small" for="vision-model">Vision model name &mdash; the name the chosen endpoint gives it</label>
-<input id="vision-model" type="text" spellcheck="false" autocomplete="off"
-       style="width: 100%; max-width: 640px; display: block; margin: 4px 0 4px"
-       placeholder="the name that endpoint gives the vision model"
-       value="{{ vision.stored_model }}">
-<p class="small" id="vision-model-live">In use: {{ vision.model.value or 'not set' }} &mdash;
-  <span class="tag">{{ vision.model.source }}</span></p>
-
-<p class="row">
-  <button id="vision-save" class="btn">Save</button>
-  <button id="vision-check" class="btn">Check the saved vision model</button>
-  <span id="vision-status" class="small"></span>
-</p>
-<p class="small">
-  The check asks the endpoint what the model can do. An Ollama server answers
-  that question directly, so a vision model can be confirmed as one and a
-  text-only model can be caught here rather than after it has transcribed a page
-  image into confident nonsense. An OpenAI-compatible endpoint offers no way to
-  ask, so the answer there is that it could not be determined &mdash; which is
-  not a yes and is not shown as one. Like the test above, the check measures
-  what is saved and not what is typed, so save before checking a change.
-</p>
-
-<div id="vision-out"></div>
 {% endblock %}
 
 {% block scripts %}
@@ -430,10 +322,6 @@ async function post(path, body) {
 // form would announce an endpoint the server may have stored differently -
 // which is the confusion this page exists to end. The note survives the reload
 // in session storage so the operator still sees that the save landed.
-// noteKey says which of the two status lines the note comes back to after the
-// reload. Both sections save through here, and a note about the vision model
-// landing on the text model's line would read as a statement about the text
-// model.
 async function save(payload, note, noteKey) {
   statusEl.textContent = 'saving…';
   try {
@@ -513,97 +401,8 @@ document.getElementById('test').addEventListener('click', async () => {
 });
 
 
-// --- reading images -------------------------------------------------------
-//
-// This section saves itself. One Save covering both would make an operator who
-// came here to change the text endpoint post the vision fields as well, and the
-// route's rule is that a field it was not sent is left exactly as it stands -
-// which is precisely the protection that would be given away.
-const visionModelBox = document.getElementById('vision-model');
-const visionStatusEl = document.getElementById('vision-status');
-const visionOut = document.getElementById('vision-out');
-const visionExternalRadio = document.getElementById('vision-external');
-const visionWarningEl = document.getElementById('vision-warning');
-
-const savedVisionMode = '{{ vision.scope }}';
-// Quoted through tojson rather than pasted between apostrophes. A model name is
-// whatever the operator typed, and a character the template escapes for HTML
-// would arrive here as an entity and never compare equal to what is in the box,
-// leaving the status line permanently claiming an unsaved change.
-const savedVisionModel = {{ vision.stored_model | tojson }};
-
-function chosenVisionMode() {
-  return visionExternalRadio.checked ? 'external' : 'local';
-}
-
-// The typed name counts as an unsaved change here, where it does not in the
-// section above. The check button measures the saved name, so typing one name
-// and then reading a green line about another is the mistake this section can
-// produce on its own, and this line is what stops it.
-function applyVisionMode() {
-  const external = chosenVisionMode() === 'external';
-  visionWarningEl.hidden = !external;
-  const changed = chosenVisionMode() !== savedVisionMode
-    || visionModelBox.value.trim() !== savedVisionModel.trim();
-  visionStatusEl.textContent = changed ? 'not saved yet — press Save' : '';
-}
-
-for (const id of ['vision-local', 'vision-external']) {
-  document.getElementById(id).addEventListener('change', applyVisionMode);
-}
-visionModelBox.addEventListener('input', applyVisionMode);
-
-function visionResult(text, kind) {
-  visionOut.innerHTML = '';
-  const p = document.createElement('p');
-  p.className = 'notice ' + (kind || '');
-  p.textContent = text;
-  visionOut.appendChild(p);
-}
-
-document.getElementById('vision-save').addEventListener('click', () => {
-  const mode = chosenVisionMode();
-  const name = visionModelBox.value.trim();
-  // Only the two vision fields are posted. The text endpoint, its key and its
-  // dialect are not this button's business, and the route leaves alone what it
-  // was not sent.
-  save({ vision_mode: mode, vision_model: name },
-       name
-         ? (mode === 'external'
-            ? `saved — ${name} reads images on the external endpoint`
-            : `saved — ${name} reads images on the local runner`)
-         : 'saved — no vision model is set, so nothing will read images',
-       'vision-note');
-});
-
-document.getElementById('vision-check').addEventListener('click', async () => {
-  const button = document.getElementById('vision-check');
-  button.disabled = true;
-  visionResult('checking…');
-  try {
-    const data = await post('/api/settings/vision/test', {});
-    // Three outcomes, never two. An endpoint that cannot be asked what a model
-    // can do is rendered without the ok class and says in words that nothing
-    // was confirmed, because the failure being guarded against here is a
-    // text-only model transcribing a page image into confident nonsense that
-    // then becomes evidence. A "could not be determined" shown in green would
-    // be read as a yes.
-    if (data.vision === 'yes') {
-      visionResult(data.message, 'ok');
-    } else if (data.vision === 'no') {
-      visionResult(data.message, 'bad');
-    } else {
-      visionResult(data.message, data.ok ? '' : 'bad');
-    }
-  } catch (err) {
-    visionResult('check failed: ' + err.message, 'bad');
-  } finally {
-    button.disabled = false;
-  }
-});
 
 applyMode();
-applyVisionMode();
 
 // After applyMode(), never before: applyMode() writes the status line itself,
 // and restoring the note first left it overwritten with an empty string on
@@ -612,11 +411,6 @@ const note = sessionStorage.getItem('settings-note');
 if (note) {
   sessionStorage.removeItem('settings-note');
   statusEl.textContent = note;
-}
-const visionNote = sessionStorage.getItem('vision-note');
-if (visionNote) {
-  sessionStorage.removeItem('vision-note');
-  visionStatusEl.textContent = visionNote;
 }
 
 // The route, the field names and the phrase are named once, here, because the

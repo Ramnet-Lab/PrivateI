@@ -367,11 +367,13 @@ def report_markdown(report_id: str):
 # its own writer in that module rather than riding along with the text fields,
 # because it is the one setting with no box to leave empty.
 #
-# The vision model rides on the same route and the same page, and it is a
-# separate setting throughout: its own name, its own choice of where it runs,
-# and its own check. It has to be separate because it is a separate model. An
-# operator who moved the text model to their own server found transcription
-# still failing against an environment variable they had never set, because the
+# Reading page images follows this setting too. It was briefly a configuration
+# of its own - its own name, its own place to run - and that was a second
+# address to keep in step with the first: the text model moved, the vision one
+# did not, and transcription failed naming a variable nobody had set. One
+# endpoint, one model, and whether it can read an image is asked of the
+# endpoint rather than configured here. What the old arrangement got right is
+# kept: the
 # two had silently been one decision made in two places.
 
 
@@ -382,10 +384,6 @@ def settings_page(request: Request):
         # under it, and the saved endpoint values the form has to render even
         # when the mode is not using them. The page needs no second source.
         "c": _counts(), "cfg": llm_settings.effective_config(),
-        # Vision is a second configuration rather than more fields on the
-        # first, because it is a second model with its own place to run. The
-        # page renders the two as two sections for the same reason.
-        "vision": llm_settings.vision_config(),
         # Named on the page so the operator knows exactly which file on disk
         # now holds the API key they just typed.
         "db_path": str(paths.STATE_DB),
@@ -409,23 +407,14 @@ def api_settings(payload: dict):
     posts it only when that endpoint is the choice being saved, and an omitted
     value leaves the stored dialect exactly as it stands.
 
-    vision_model and vision_scope live on the same rule and are the reason it
-    is worth stating twice. The page saves the vision section on its own
-    button, so a save from the text section posts neither of them and the
-    vision configuration is not touched; a save from the vision section posts
-    only those two and leaves the endpoint, its key and its dialect alone.
     """
     url = payload.get("url")
     model = payload.get("model")
     api_key = payload.get("api_key")
     mode = payload.get("mode")
     api_flavor = payload.get("api_flavor")
-    vision_model = payload.get("vision_model")
-    vision_scope = payload.get("vision_scope")
     for name, value in (("url", url), ("model", model), ("api_key", api_key),
-                        ("mode", mode), ("api_flavor", api_flavor),
-                        ("vision_model", vision_model),
-                        ("vision_scope", vision_scope)):
+                        ("mode", mode), ("api_flavor", api_flavor),):
         if value is not None and not isinstance(value, str):
             raise HTTPException(status_code=400, detail=f"{name} must be text")
     # The mode is checked before anything is written. set_mode() would refuse
@@ -443,16 +432,6 @@ def api_settings(payload: dict):
         raise HTTPException(
             status_code=400,
             detail=f"api_flavor must be one of {', '.join(llm_settings.FLAVORS)}")
-    # And the vision scope in the same breath, before anything is written. Its
-    # two values happen to be spelled the same as the text mode's, which is
-    # exactly why it is checked against its own tuple: the day a third text mode
-    # appears, it must not become a third place to run vision by accident.
-    if (vision_scope is not None
-            and vision_scope not in llm_settings.VISION_SCOPES):
-        raise HTTPException(
-            status_code=400,
-            detail="vision_scope must be one of "
-                   f"{', '.join(llm_settings.VISION_SCOPES)}")
     try:
         # The endpoint values are stored first and the mode is switched after,
         # so external mode is never in force for the moment before the address
@@ -463,11 +442,6 @@ def api_settings(payload: dict):
         # moment before the way to speak to that address has been stored.
         if api_flavor is not None:
             llm_settings.set_api_flavor(api_flavor)
-        # Vision goes through its own writer, which stores the model name before
-        # it switches the scope on the same reasoning the two lines above
-        # follow. Both halves take None to mean the form did not send them, so
-        # a save from either section of the page leaves the other alone.
-        llm_settings.save_vision_config(model=vision_model, scope=vision_scope)
         if mode is not None:
             llm_settings.set_mode(mode)
     except llm_settings.SettingsError as exc:
@@ -475,14 +449,10 @@ def api_settings(payload: dict):
         # error to fix and the message names the field, so it belongs on the
         # page rather than in a 500 that reads as a fault in the application.
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    log.info("model settings updated: mode=%s dialect=%s "
-             "vision=%s scope=%s",
-             llm_settings.mode(), llm_settings.api_flavor(),
-             llm_settings.effective_vision_model() or "not set",
-             llm_settings.vision_scope())
+    log.info("model settings updated: mode=%s dialect=%s",
+             llm_settings.mode(), llm_settings.api_flavor())
     return JSONResponse({"saved": True,
-                         "config": llm_settings.config_as_dict(),
-                         "vision": llm_settings.vision_config_as_dict()})
+                         "config": llm_settings.config_as_dict()})
 
 
 @app.post("/api/settings/test")
@@ -510,35 +480,6 @@ def api_settings_test():
     # for the saved tickbox to do it.
     outcome.setdefault("api_flavor", llm_settings.stored_api_flavor())
     return JSONResponse(outcome)
-
-
-@app.post("/api/settings/vision/test")
-def api_settings_vision_test():
-    """Ask whether the saved vision model exists and can actually read images.
-
-    This is two questions rather than one. Whether the endpoint serves the model
-    can be asked of anything; whether the model can see can only be asked of an
-    Ollama server, over /api/show. The answer to the second is therefore
-    three-valued - yes, no, or not askable here - and the third is not a pass.
-    The page renders all three differently, so a model that could not be
-    verified is never shown as a model that was.
-
-    It checks what is saved rather than what is posted, exactly as the text
-    check above does and for the same reason: nothing about this route needs a
-    request body, and the stored key never travels back and forth over it.
-    """
-    outcome = llm_settings.check_vision_connectivity()
-    # The scope and the dialect name what the answer was measured against. A
-    # line that said only "cannot be verified" would read as a fact about the
-    # model, when it is a fact about the endpoint being asked - and an operator
-    # who switched vision to their Ollama server would have no way to see that
-    # the check had gone to the local runner instead.
-    outcome.setdefault("scope", llm_settings.vision_scope())
-    outcome.setdefault("api_flavor", llm_settings.vision_api_flavor())
-    outcome.setdefault("can_be_verified", llm_settings.vision_can_be_verified())
-    return JSONResponse(outcome)
-
-
 @app.get("/healthz", response_class=PlainTextResponse)
 def healthz():
     state.query_one("SELECT 1 AS n")
