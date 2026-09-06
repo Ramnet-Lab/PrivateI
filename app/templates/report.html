@@ -29,7 +29,11 @@
   <input id="runs" type="number" min="1" max="{{ max_runs }}" step="1" value="1"
          style="width: 64px">
   <button id="run" {% if not chat_model %}disabled{% endif %}>Run report</button>
-  <span id="status" class="small"></span>
+  <span class="run-activity">
+    <span id="spin" class="spinner" hidden></span>
+    <span id="status" class="small"></span>
+    <span id="elapsed" class="elapsed" hidden></span>
+  </span>
 </div>
 
 <p class="note small">
@@ -80,6 +84,63 @@ const out = document.getElementById('out');
 const runsBox = document.getElementById('runs');
 const allowBox = document.getElementById('allow-incomplete');
 const consensusEl = document.getElementById('consensus');
+const spinEl = document.getElementById('spin');
+const elapsedEl = document.getElementById('elapsed');
+
+// A report is several model passes per allegation, and only two of them stream
+// anything: the findings section and the summary. The element pass and the five
+// comparison draws return one whole answer each, so between two status lines the
+// page has minutes with nothing arriving on it. The wheel says the request is
+// still open; the two clocks beside it say how long this pass and the whole run
+// have been going, which is the part a wheel cannot say. A pass that has sent
+// nothing for two minutes is called out rather than left looking like the rest,
+// because a wheel turns identically over a slow pass and a dead endpoint.
+const STALLED_AFTER_MS = 120000;
+let runStartedAt = 0, phaseStartedAt = 0, lastEventAt = 0, ticker = null;
+
+function elapsed(ms) {
+  const total = Math.max(0, Math.round(ms / 1000));
+  const h = Math.floor(total / 3600), m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h) return `${h}h${String(m).padStart(2, '0')}m`;
+  if (m) return `${m}m${String(s).padStart(2, '0')}s`;
+  return `${s}s`;
+}
+
+function tick() {
+  const now = Date.now();
+  const quiet = now - lastEventAt;
+  let text = `${elapsed(now - phaseStartedAt)} · ${elapsed(now - runStartedAt)} total`;
+  if (quiet > STALLED_AFTER_MS) text += ` · nothing received for ${elapsed(quiet)}`;
+  elapsedEl.textContent = text;
+  elapsedEl.classList.toggle('stalled', quiet > STALLED_AFTER_MS);
+}
+
+// newPhase is for the events that mean the run moved on to a different piece of
+// work. Streamed tokens keep the clock honest about silence without restarting
+// the phase clock, which is measuring how long this pass has been running.
+function noteEvent(newPhase) {
+  lastEventAt = Date.now();
+  if (newPhase) phaseStartedAt = lastEventAt;
+  if (ticker) tick();
+}
+
+function startActivity() {
+  runStartedAt = phaseStartedAt = lastEventAt = Date.now();
+  spinEl.hidden = false;
+  elapsedEl.hidden = false;
+  elapsedEl.classList.remove('stalled');
+  tick();
+  ticker = window.setInterval(tick, 1000);
+}
+
+function stopActivity() {
+  if (ticker) window.clearInterval(ticker);
+  ticker = null;
+  spinEl.hidden = true;
+  elapsedEl.classList.remove('stalled');
+  elapsedEl.textContent = `${elapsed(Date.now() - runStartedAt)} total`;
+}
 
 function renumber() {
   list.querySelectorAll('.allegation-row .alg-num')
@@ -177,6 +238,7 @@ document.getElementById('run').addEventListener('click', async () => {
   statusEl.textContent = 'starting…';
   const run = document.getElementById('run');
   run.disabled = true;
+  startActivity();
 
   try {
     const payload = collect();
@@ -207,20 +269,27 @@ document.getElementById('run').addEventListener('click', async () => {
         if (!kind || raw === undefined) continue;
         let data; try { data = JSON.parse(raw); } catch { continue; }
         if (kind === 'status') {
+          noteEvent(true);
           statusEl.textContent = data;
         } else if (kind === 'run') {
+          noteEvent(true);
           statusEl.textContent = `run ${data.n} of ${data.of} — seed ${data.seed}`;
         } else if (kind === 'run-done') {
+          noteEvent(true);
           statusEl.textContent = `run ${data.n} of ${data.of} finished`;
         } else if (kind === 'token') {
+          noteEvent(false);
           out.textContent += data;
           out.scrollTop = out.scrollHeight;
         } else if (kind === 'consensus') {
+          noteEvent(true);
           renderConsensus(data);
         } else if (kind === 'error') {
+          noteEvent(true);
           statusEl.textContent = 'failed';
           out.textContent += '\n\n' + data;
         } else if (kind === 'done') {
+          noteEvent(true);
           statusEl.innerHTML = `finished — <a href="/reports/${data.report_id}">download</a>`;
         }
       }
@@ -228,6 +297,7 @@ document.getElementById('run').addEventListener('click', async () => {
   } catch (err) {
     statusEl.textContent = 'failed: ' + err;
   } finally {
+    stopActivity();
     run.disabled = false;
   }
 });

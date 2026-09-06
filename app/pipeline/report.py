@@ -2608,6 +2608,10 @@ def generate(goal: str | None = None, allegations: list[str] | None = None, *,
     labels = disposition_labels()
     system = SYSTEM_TEMPLATE.format(yes_label=labels[0], no_label=labels[1])
 
+    # Named before it happens: on a cold endpoint this call is the pull of a
+    # multi-gigabyte model, and it sits between the click and the first
+    # allegation with nothing else to show for the wait.
+    yield "status", f"Checking {model} is loaded"
     client = Ollama()
     try:
         client.require_model(model, llm_settings.text_model_label())
@@ -2691,7 +2695,6 @@ def generate(goal: str | None = None, allegations: list[str] | None = None, *,
         # Shown the record first it reads the elements back off whatever the
         # record happens to admit, which is how one conceded act came to satisfy
         # a claim about a course of conduct.
-        yield "status", f"Allegation {index} of {len(allegations)}: elements"
         elements_prompt = ELEMENTS_TEMPLATE.format(allegation=allegation)
         elements, element_note = [], ""
         # The decomposition is what every check below is measured against, so an
@@ -2699,6 +2702,13 @@ def generate(goal: str | None = None, allegations: list[str] | None = None, *,
         # blocks whose MULTIPLICITY line could not be read - is worth a second,
         # independently seeded call before the allegation is tested on it.
         for attempt in (1, 2):
+            # Inside the loop rather than above it. Each attempt is a whole
+            # model call with nothing streamed out of it, so an attempt that
+            # does not announce itself is a second silence indistinguishable
+            # from the first one still running.
+            yield "status", (f"Allegation {index} of {len(allegations)}: "
+                             f"breaking the allegation into elements"
+                             + ("" if attempt == 1 else " (second attempt)"))
             raw_elements = ""
             try:
                 answer = client.generate(
@@ -2720,10 +2730,12 @@ def generate(goal: str | None = None, allegations: list[str] | None = None, *,
         # for alongside findings it rides on chance - one graded run caught a
         # wording conflict, the next demoted it to a gap. A single-purpose
         # comparison first, adjudicated inside the findings second, pins it.
-        yield "status", f"Allegation {index} of {len(allegations)}: comparing witnesses"
         conflict_candidates, corroboration = "NONE", "NONE"
         conflict_draws, corroboration_draws = [], []
         for draw in range(CONFLICT_DRAWS):
+            yield "status", (f"Allegation {index} of {len(allegations)}: "
+                             f"comparing witnesses (draw {draw + 1} of "
+                             f"{CONFLICT_DRAWS})")
             try:
                 draw_options = dict(options)
                 draw_options["seed"] = random_seed()
@@ -2751,7 +2763,7 @@ def generate(goal: str | None = None, allegations: list[str] | None = None, *,
         log.info("allegation %d: %d comparison draw(s) pooled", index,
                  len(conflict_draws))
 
-        yield "status", f"Allegation {index} of {len(allegations)}"
+        yield "status", f"Allegation {index} of {len(allegations)}: writing findings"
         goal_note = (f"INVESTIGATIVE GOAL (context only - goals are answered, "
                      f"never 'substantiated'):\n{goal}\n\n" if goal else "")
         prompt = goal_note + ALLEGATION_TEMPLATE.format(

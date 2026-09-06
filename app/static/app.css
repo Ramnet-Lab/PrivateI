@@ -135,3 +135,29 @@ td.quote { color: var(--muted); font-size: 12px; max-width: 380px; }
   font-variant-numeric: tabular-nums; }
 .allegation-row textarea { flex: 1; font-size: 13px; }
 #add-allegation { margin: 2px 0 14px 30px; }
+
+/* --- run activity --------------------------------------------------------- */
+/* A report is many model passes on local hardware and most of them stream
+   nothing, so the page has to say it is still working without claiming
+   progress it cannot see. The wheel turns while the request is open; the
+   elapsed times beside it are what makes it honest, because a wheel on its own
+   turns exactly the same over a healthy pass and over a hung endpoint. */
+.spinner { display: inline-block; width: 12px; height: 12px; flex: none;
+  border: 2px solid var(--line); border-top-color: var(--accent);
+  border-radius: 50%; animation: spin .7s linear infinite; }
+/* A class rule setting display beats the browser's own [hidden] rule, so
+   without this the wheel turns before the run starts and goes on turning
+   after it finishes. */
+.spinner[hidden] { display: none; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .spinner { animation-duration: 2.4s; }
+}
+/* inline-flex, not flex: .row carries no layout rule of its own, so its
+   children flow inline and a block-level box here would drop the status
+   line onto its own line below the button. */
+.run-activity { display: inline-flex; align-items: center; gap: 8px;
+  flex-wrap: wrap; }
+.elapsed { color: var(--muted); font-size: 12px;
+  font-variant-numeric: tabular-nums; }
+.elapsed.stalled { color: var(--warn); }
