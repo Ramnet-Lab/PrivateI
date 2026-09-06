@@ -528,6 +528,24 @@ def api_links(payload: dict):
     return JSONResponse({"run_id": run.run_id, "started_at": run.started_at})
 
 
+@app.post("/api/links/clear")
+def api_links_clear(payload: dict | None = None):
+    """Discard every judgement so the corpus can be compared again.
+
+    A judged pair is never asked twice, which is what makes a run resumable and
+    what makes the second run of an unchanged corpus free. The cost of that is
+    there being no way to ask again after changing a prompt or a threshold - so
+    this is that way, and it is explicit because it throws away hours of work.
+    """
+    busy = report_run.active()
+    if busy is not None and busy.kind == "link pass":
+        raise HTTPException(
+            status_code=409,
+            detail="a link pass is running; stop it before discarding what it "
+                   "has written")
+    return JSONResponse({"discarded": links.clear()})
+
+
 @app.get("/api/links/found")
 def api_links_found(pairing: str | None = None, limit: int = 400):
     return JSONResponse({"links": links.found(pairing, limit),

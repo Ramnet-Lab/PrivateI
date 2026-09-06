@@ -324,7 +324,10 @@ function attach(runId, startedAt, live, finishedAt) {
   source.addEventListener('ended', (ev) => {
     let data; try { data = JSON.parse(ev.data); } catch { data = {}; }
     if (data.status === 'stopped') statusEl.textContent = 'stopped';
-    runEndedAt = Date.now();
+    // Only when it ended while this page was watching. Attaching to a run that
+    // finished earlier replays this same entry, and stamping now over the real
+    // end time would report the age of the run instead of how long it took.
+    if (runEndedAt === null) runEndedAt = Date.now();
     detach();
     stopActivity();
     setRunning(false);

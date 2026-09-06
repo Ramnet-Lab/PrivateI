@@ -22,6 +22,7 @@
     include claims that are not assertions</label>
   <button id="run" {% if not chat_model %}disabled{% endif %}>Run pass</button>
   <button type="button" id="stop" class="btn danger" hidden>Stop</button>
+  <button type="button" id="clear" class="btn danger">Discard and start again</button>
   <span class="run-activity">
     <span id="spin" class="spinner" hidden></span>
     <span id="status" class="small"></span>
@@ -100,6 +101,7 @@ const elapsedEl = document.getElementById('elapsed');
 const runBtn = document.getElementById('run');
 const stopBtn = document.getElementById('stop');
 const filterBox = document.getElementById('filter');
+const clearBtn = document.getElementById('clear');
 const canRun = !runBtn.disabled;
 
 const esc = (s) => String(s === null || s === undefined ? '' : s)
@@ -211,6 +213,7 @@ let attachedRunId = null;
 function setRunning(live) {
   runBtn.disabled = live || !canRun;
   stopBtn.hidden = !live;
+  clearBtn.disabled = live;
   modeBox.disabled = live;
   keepBox.disabled = live;
 }
@@ -256,7 +259,10 @@ function attach(runId, startedAt, live, finishedAt) {
   source.addEventListener('ended', (ev) => {
     let data; try { data = JSON.parse(ev.data); } catch { data = {}; }
     if (data.status === 'stopped') statusEl.textContent = 'stopped';
-    runEndedAt = Date.now();
+    // Only when it ended while this page was watching. Attaching to a run that
+    // finished earlier replays this same entry, and stamping now over the real
+    // end time would report the age of the run instead of how long it took.
+    if (runEndedAt === null) runEndedAt = Date.now();
     detach();
     stopActivity();
     setRunning(false);
@@ -319,6 +325,31 @@ stopBtn.addEventListener('click', async () => {
     statusEl.textContent = res.ok ? 'stopping…' : 'could not stop it';
   } finally {
     stopBtn.disabled = false;
+  }
+});
+
+// A judged pair is never asked again, which is what makes a run resumable and
+// a re-run of an unchanged corpus free. It also means the Run button does
+// nothing once everything is judged, so there has to be a way to ask again.
+clearBtn.addEventListener('click', async () => {
+  const n = estimate ? estimate.already_judged.toLocaleString() : 'all';
+  if (!confirm(`Discard ${n} judged pair(s)?\n\nEvery connection found so far ` +
+               `is deleted and the whole corpus has to be compared again from ` +
+               `nothing. Only worth it after changing how the comparison is ` +
+               `made.`)) return;
+  clearBtn.disabled = true;
+  try {
+    const res = await fetch('/api/links/clear', { method: 'POST' });
+    const body = await res.json().catch(() => null);
+    statusEl.textContent = res.ok
+      ? `discarded ${(body && body.discarded) || 0} judgement(s)`
+      : ((body && body.detail) || 'could not discard them');
+    out.hidden = true;
+    out.textContent = '';
+  } finally {
+    clearBtn.disabled = false;
+    refreshEstimate();
+    refreshFound();
   }
 });
 
