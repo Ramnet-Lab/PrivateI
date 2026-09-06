@@ -1143,17 +1143,25 @@ class ModelRunner:
     def _native_options(options: dict | None) -> dict:
         """The sampling options Ollama takes in its "options" object.
 
-        num_ctx is deliberately NOT among them. Ollama sizes a model's context
-        itself, and this application has no basis for a better number: the
-        value it would send comes from a variable meant for the local runner,
-        so passing it would override the server's own judgement with a figure
-        that has nothing to do with the model actually loaded there. Sampling
-        settings travel because they are the caller's to choose; how much
-        context a model gets is the server's.
+        num_ctx is among them, and leaving it out was a mistake worth naming.
+        The reasoning for omitting it was that Ollama sizes a model's context
+        itself and knows better than a variable meant for the local runner.
+        It does not size it: it applies a fixed default and silently discards
+        whatever does not fit. Measured against a server running Ollama 0.33.3
+        with a model whose own context length is 262,144 - a 14,450-token
+        prompt came back with prompt_eval_count 2,051. Nothing was reported.
+        The answer arrived fluent and on topic, because what survives
+        truncation is the end of the prompt, where the evidence is; what was
+        dropped was the beginning, where the instructions are.
+
+        So silence is not deference here. Sending nothing does not ask the
+        server to choose - it accepts 2,048 tokens and loses the front of every
+        long prompt, which on this pipeline means the report's element blocks,
+        its conflict headings and the shape of every structured answer.
         """
         options = options or {}
         native: dict[str, Any] = {}
-        for name in ("temperature", "seed"):
+        for name in ("num_ctx", "temperature", "seed"):
             if name in options:
                 native[name] = options[name]
         # num_predict <= 0 means uncapped to every caller here. Ollama reads 0
@@ -1245,6 +1253,50 @@ class ModelRunner:
             f"(finish_reason={finish}, reasoning began: "
             f"{reasoning.strip()[:120]!r})")
 
+    # A prompt this many times larger than what the server says it read cannot
+    # have been read whole. Set far below any real ratio - English runs about
+    # four to five characters a token - so this fires on a window that swallowed
+    # most of a prompt and never on one that is merely dense.
+    _TRUNCATION_CHARS_PER_TOKEN = 12
+
+    def _warn_if_truncated(self, model: str, sent_chars: int,
+                           options: dict[str, Any] | None, usage: dict) -> None:
+        """Say so when the server read less of the prompt than was sent.
+
+        This is the worst shape a model failure takes in this pipeline, because
+        nothing about the reply looks wrong. Truncation drops the front of the
+        prompt and keeps the end, and the end is where the evidence sits - so
+        the answer comes back fluent, on topic, citing real documents, and
+        shaped by none of the instructions it was supposed to follow. A report
+        written that way substantiated nothing, three allegations running, and
+        the only trace was that every structured block came back missing.
+
+        The one witness is the prompt token count the server reports next to
+        its answer. Two things make it testify: a count far below what was
+        sent, and a count sitting exactly on the window, which is what a
+        prompt cut to fit looks like from outside.
+        """
+        read = usage.get("prompt_tokens")
+        if not isinstance(read, int) or read <= 0 or sent_chars <= 0:
+            return
+        # Only the native dialect sends num_ctx, so only there does the number
+        # in options describe the window the server actually used. On the
+        # OpenAI path it is a value the caller carries and the request drops,
+        # and testing against it would invent a warning out of a coincidence.
+        window = (options or {}).get("num_ctx") if self.is_ollama else None
+        at_window = isinstance(window, int) and 0 < window <= read + 8
+        far_short = read < sent_chars / self._TRUNCATION_CHARS_PER_TOKEN
+        if not (at_window or far_short):
+            return
+        log.warning(
+            "%s read %d prompt token(s) of roughly %d character(s) sent%s - the "
+            "prompt was cut to fit the context window, and what is cut is the "
+            "start, where the instructions are. Raise the context (TEXT_NUM_CTX, "
+            "or the window the endpoint gives this model); the answer to this "
+            "call cannot be trusted to have followed its instructions.",
+            model, read, sent_chars,
+            f" against a window of {window}" if at_window else "")
+
     # -- generation --------------------------------------------------------------
 
     def generate(self, model: str, prompt: str, *, images: list[Path] | None = None,
@@ -1256,6 +1308,8 @@ class ModelRunner:
         parsed = self._parse_json(raw)
 
         content, reasoning, finish, usage = self._reply_parts(parsed)
+        self._warn_if_truncated(model, len(prompt) + len(system or ""),
+                                options, usage)
 
         if reasoning:
             log.info("%s reasoned before answering (%s completion tokens total)",
