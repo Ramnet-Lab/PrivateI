@@ -1050,17 +1050,40 @@ class ModelRunner:
         return {"type": "image_url",
                 "image_url": {"url": f"data:{mime};base64,{encoded}"}}
 
+    @staticmethod
+    def _image_b64(path: Path) -> str:
+        """Bare base64, which is what Ollama's native API wants.
+
+        Not a data URI: the OpenAI dialect carries the mime type inside the
+        url string, while /api/chat takes the encoded bytes on their own and
+        rejects the prefix.
+        """
+        return base64.b64encode(path.read_bytes()).decode("ascii")
+
     def _messages(self, prompt: str, system: str | None,
                   images: list[Path] | None) -> list[dict]:
+        """The messages array, in the shape this endpoint's dialect expects.
+
+        The two dialects carry an image completely differently. The OpenAI one
+        replaces the message content with a list of parts, one of them an
+        image_url holding a data URI. Ollama's native API leaves content as the
+        prompt string and hangs a sibling "images" array of bare base64 off the
+        same message. Sending the first shape to /api/chat is not an error the
+        server reports - it simply never sees an image, and a transcription
+        pass then describes a page it was never shown.
+        """
         messages: list[dict] = []
         if system:
             messages.append({"role": "system", "content": system})
-        if images:
+        if not images:
+            messages.append({"role": "user", "content": prompt})
+        elif self.is_ollama:
+            messages.append({"role": "user", "content": prompt,
+                             "images": [self._image_b64(p) for p in images]})
+        else:
             content: list[dict] = [{"type": "text", "text": prompt}]
             content += [self._image_part(p) for p in images]
             messages.append({"role": "user", "content": content})
-        else:
-            messages.append({"role": "user", "content": prompt})
         return messages
 
     @staticmethod
