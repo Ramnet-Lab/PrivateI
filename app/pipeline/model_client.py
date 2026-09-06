@@ -1120,15 +1120,17 @@ class ModelRunner:
     def _native_options(options: dict | None) -> dict:
         """The sampling options Ollama takes in its "options" object.
 
-        num_ctx is the point of the exercise. Sent here it is honoured; sent to
-        the same server's /v1 endpoint it is accepted and discarded, and the
-        model then meets a 6000-character chunk with whatever small default the
-        server was started with. The rest travel with it because they are
-        dropped by that endpoint in exactly the same way.
+        num_ctx is deliberately NOT among them. Ollama sizes a model's context
+        itself, and this application has no basis for a better number: the
+        value it would send comes from a variable meant for the local runner,
+        so passing it would override the server's own judgement with a figure
+        that has nothing to do with the model actually loaded there. Sampling
+        settings travel because they are the caller's to choose; how much
+        context a model gets is the server's.
         """
         options = options or {}
         native: dict[str, Any] = {}
-        for name in ("num_ctx", "temperature", "seed"):
+        for name in ("temperature", "seed"):
             if name in options:
                 native[name] = options[name]
         # num_predict <= 0 means uncapped to every caller here. Ollama reads 0

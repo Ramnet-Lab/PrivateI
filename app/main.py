@@ -476,7 +476,7 @@ def api_settings(payload: dict):
         # page rather than in a 500 that reads as a fault in the application.
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     log.info("model settings updated: mode=%s dialect=%s "
-             "vision=%s on the %s runner",
+             "vision=%s scope=%s",
              llm_settings.mode(), llm_settings.api_flavor(),
              llm_settings.effective_vision_model() or "not set",
              llm_settings.vision_scope())

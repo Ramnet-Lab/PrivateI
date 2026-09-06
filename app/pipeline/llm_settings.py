@@ -786,8 +786,7 @@ def vision_missing_message() -> str:
     """
     return (
         "No vision model is set, so pages that can only be read from an image "
-        "cannot be transcribed - choose one on the settings page, under the "
-        "vision model.\n"
+        "cannot be transcribed - choose a vision model on the settings page.\n"
         "This affects scans and photographs only. A PDF whose text can be "
         "extracted never reaches this stage and is unaffected.\n"
         "VLM_MODEL in .env is still honoured for the local runner, if you "
