@@ -164,8 +164,17 @@ def run(doc_id: str, on_progress=lambda _m: None) -> int:
         for ord_, piece in enumerate(chunk_text(found.read_text(encoding="utf-8"))):
             cid = chunk_id(doc_id, page["page_num"], ord_, piece)
             existing = state.query_one(
-                "SELECT embedding FROM chunks WHERE chunk_id=?", (cid,))
-            if existing and existing["embedding"]:
+                "SELECT embedding, model FROM chunks WHERE chunk_id=?", (cid,))
+            # Also re-embed a passage whose vector was built by a different
+            # model. A vector from another model is not a cheaper version of
+            # this one, it is a point in a different space, and _matrix()
+            # below throws it away. Without the model test, changing
+            # EMBED_MODEL left every existing vector stranded for good: run()
+            # skipped them because they had *a* vector, so "Re-index passages"
+            # reported success having done no work at all, and every question
+            # quietly fell back to keyword matching because its width no
+            # longer matched theirs.
+            if existing and existing["embedding"] and existing["model"] == model:
                 continue
             pending.append((cid, doc_id, page["page_num"], ord_, piece))
 
@@ -299,8 +308,24 @@ def backfill(on_progress=lambda _m: None) -> int:
 
 
 def stats() -> dict:
+    """Counts for the chat page, including passages the index cannot use.
+
+    A passage embedded by a model other than the one configured now is counted
+    apart, because what the operator needs to know is not how many rows hold a
+    vector but how many of those vectors search can still use. Such a row is
+    still stored, still counted as embedded, and is silently dropped from every
+    search, so a page reporting only "embedded" told the operator the index was
+    fine while every answer came from keyword matching.
+    """
+    model = env_str("EMBED_MODEL", "").strip()
     row = state.query_one(
-        "SELECT COUNT(*) AS n, SUM(CASE WHEN embedding IS NOT NULL THEN 1 ELSE 0 END) "
-        "AS embedded FROM chunks")
+        "SELECT COUNT(*) AS n, "
+        "       SUM(CASE WHEN embedding IS NOT NULL THEN 1 ELSE 0 END) AS embedded, "
+        "       SUM(CASE WHEN embedding IS NOT NULL AND IFNULL(model,'') <> ? "
+        "                THEN 1 ELSE 0 END) AS stale "
+        "FROM chunks", (model,))
     return {"chunks": row["n"] if row else 0,
-            "embedded": (row["embedded"] or 0) if row else 0}
+            "embedded": (row["embedded"] or 0) if row else 0,
+            # With no model configured nothing is stale: there is nothing for a
+            # vector to be stale against, and every row would otherwise count.
+            "stale": (row["stale"] or 0) if (row and model) else 0}

@@ -2,7 +2,7 @@ SHELL := /bin/bash
 COMPOSE := docker compose
 
 .DEFAULT_GOAL := help
-.PHONY: help setup up down logs restart rebuild status reset destroy models
+.PHONY: help setup up down logs restart rebuild status reset destroy models pull
 
 help:
 	@echo "  ./start.sh     first time? use this - it does everything below"
@@ -11,6 +11,8 @@ help:
 	@echo "  make down      stop everything"
 	@echo "  make logs      follow the app log"
 	@echo "  make rebuild   rebuild the image after a code change"
+	@echo "  make pull      download the models named in .env (make up does this)"
+	@echo "  note: plain 'docker compose up' skips the model download"
 	@echo "  make models    list the models Model Runner has"
 	@echo "  make pull      download the models named in .env"
 	@echo "  make status    container health"
@@ -23,7 +25,7 @@ setup:
 	@grep -q '^NEO4J_PASSWORD=.\+' .env \
 	  || echo "NEO4J_PASSWORD is empty in .env - generate one: openssl rand -base64 24"
 
-up: setup
+up: pull
 	$(COMPOSE) up -d --build
 	@echo
 	@echo "  http://127.0.0.1:$${APP_PORT:-8080}"
@@ -37,7 +39,7 @@ logs:
 restart:
 	$(COMPOSE) restart app
 
-rebuild:
+rebuild: pull
 	$(COMPOSE) up -d --build app
 
 status:
@@ -46,13 +48,13 @@ status:
 models:
 	@docker model list 2>/dev/null || echo "Model Runner is not on - run ./start.sh"
 
-# Two models, not three: transcription asks for the text model, so there is no
-# separate vision model to fetch. VLM_MODEL is read by nothing.
-pull:
-	@for m in $$(grep -hE '^(TEXT_MODEL|EMBED_MODEL)=' .env \
-	              | cut -d= -f2 | sort -u); do \
-	    echo "pulling $$m"; docker model pull "$$m"; \
-	  done
+# Models live in the host's Model Runner, never in the image: the container has
+# no Docker socket, so nothing at image-build time could fetch them. This is how
+# a build gets its models - every target that builds depends on this one. Two
+# models, not three: transcription asks for the text model, so there is no
+# separate vision model to fetch.
+pull: setup
+	@./scripts/pull-models.sh
 
 reset:
 	@read -r -p "Delete every uploaded document and empty the graph? [y/N] " ok; \

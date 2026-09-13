@@ -35,7 +35,7 @@ The vision model - the one that reads a scan or a photograph - is settled here
 too, and separately. It is a different model and may live somewhere else
 entirely: an operator who moves the text model to their own server usually has
 not moved anything else, and the first thing they saw when they tried was a
-transcription failure naming VLM_MODEL, an environment variable they had never
+transcription failure naming an environment variable they had never
 set. So vision has its own model name and its own choice of where it runs, and
 that choice defaults to the local runner, which is what transcription has
 always used. Where the endpoint can be asked - Ollama's native API answers
@@ -610,11 +610,11 @@ def check_connection(base_url_value: str = "", model_value: str = "",
 # the vision model
 #
 # Transcription is the one stage that hands a picture to a model, and it has
-# always run on the local runner with a model named by VLM_MODEL in .env. That
+# always run on the local runner with a model named in .env. That
 # pinning was deliberate - a server chosen for its text model may serve no
 # vision model at all - but it made the two settings move independently in the
 # worst way: the operator pointed the text model at their own Ollama server,
-# uploaded a scan, and was told VLM_MODEL was not set, naming a file they had
+# uploaded a scan, and was told no vision model was set, naming a file they had
 # never edited about a model they had never chosen.
 #
 # So the vision model is configured here, in the same place and in the same
@@ -674,21 +674,10 @@ def vision_model() -> Resolved:
     page unable to name a model on the local runner at all, which is half of
     what this feature is for.
 
-    VLM_MODEL remains the fallback for the local runner, so a machine that has
-    been working from .env goes on working untouched. It is deliberately not a
-    fallback for someone else's endpoint - that is the mistake this whole
-    module exists to prevent, and it has already been made once here with
-    TEXT_MODEL: the local model's name on a remote server produces an error
-    about a model that server has never heard of.
     """
     stored = _setting(SETTING_VISION_MODEL)
     if stored:
         return Resolved(stored, "settings")
-    if is_vision_external():
-        return Resolved("", "unset")
-    from_env = _clean(env_str("VLM_MODEL", ""))
-    if from_env:
-        return Resolved(from_env, "environment")
     return Resolved("", "unset")
 
 
@@ -708,8 +697,6 @@ def vision_model_label() -> str:
     source = vision_model().source
     if source == "settings":
         return "the vision model chosen on the settings page"
-    if source == "environment":
-        return "VLM_MODEL in .env"
     return "the vision model"
 
 
@@ -789,8 +776,7 @@ def vision_missing_message() -> str:
         "cannot be transcribed - choose a vision model on the settings page.\n"
         "This affects scans and photographs only. A PDF whose text can be "
         "extracted never reaches this stage and is unaffected.\n"
-        "VLM_MODEL in .env is still honoured for the local runner, if you "
-        "would rather set it there.")
+)
 
 
 def save_vision_model(model: str | None) -> None:
@@ -916,8 +902,6 @@ def check_vision(model_value: str = "",
                    f"{VISION_EXTERNAL!r} (got {scope_value!r})")
 
     want = _clean(model_value) or stored_vision_model()
-    if not want and scope == VISION_LOCAL:
-        want = _clean(env_str("VLM_MODEL", ""))
 
     if scope == VISION_EXTERNAL:
         url, key, flavor = stored_base_url(), _api_key(), stored_api_flavor()

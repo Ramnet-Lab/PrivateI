@@ -207,7 +207,10 @@ reach Docker Model Runner. Check `docker model status`, turn it on with
 `docker desktop enable model-runner`, then hit Retry on the document.
 
 **A document says "unreadable".** No text could be read from any page, which
-means it is a scan needing a vision model. Set `VLM_MODEL` and retry it.
+means the text model could not read the page images. Check that a model is
+set on the settings page (or `TEXT_MODEL` in `.env`), then Retry the document
+— transcription asks for the text model, so there is no separate vision model
+to set.
 
 **Neo4j rejects the password after you changed it.** The initial password is
 stored on first start. Either change it in the Neo4j browser at

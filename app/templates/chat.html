@@ -3,10 +3,19 @@
 <h1>Ask about your documents</h1>
 <p class="note small">
   Answers come only from what is in your documents, cited by file and page.
-  {% if index.embedded %}{{ index.embedded }} passage(s) indexed.
+  {% set usable = index.embedded - index.stale %}
+  {% if usable %}{{ usable }} passage(s) indexed.
   {% else %}No passages indexed yet — questions fall back to keyword matching.{% endif %}
   {% if not chat_model %}<strong>No text model is set. Choose one on the settings page.</strong>{% endif %}
-  {% if not embed_model %}<a href="#" id="reindex">Index passages</a> after setting EMBED_MODEL.{% endif %}
+  {# The link used to render ONLY when EMBED_MODEL was unset - which is exactly
+     the state in which re-indexing does nothing - and was hidden in both states
+     where it works. #}
+  {% if index.stale %}<strong>{{ index.stale }} passage(s) were indexed with a different
+  embedding model and are being ignored, so answers fall back to keyword matching.</strong>
+  <a href="#" id="reindex">Re-index passages</a> to rebuild them with {{ embed_model }}.
+  {% elif embed_model and index.chunks > index.embedded %}<a href="#" id="reindex">Index passages</a>
+  that have not been indexed yet.
+  {% elif not embed_model %}No EMBED_MODEL is set in .env, so passages cannot be indexed.{% endif %}
 </p>
 
 <div id="thread" class="thread"></div>

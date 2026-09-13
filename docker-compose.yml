@@ -26,7 +26,6 @@ services:
       # Docker Model Runner serves generation, vision, and embeddings alike.
       MODEL_URL: ${MODEL_URL:-http://model-runner.docker.internal/v1}
       EMBED_MODEL_URL: ${EMBED_MODEL_URL:-http://model-runner.docker.internal/v1}
-      VLM_MODEL: ${VLM_MODEL:-}
       TEXT_MODEL: ${TEXT_MODEL:-}
       EMBED_MODEL: ${EMBED_MODEL:-}
       VLM_TEMPERATURE: ${VLM_TEMPERATURE:-0}

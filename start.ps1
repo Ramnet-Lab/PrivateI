@@ -239,16 +239,18 @@ if ((Get-EnvValue 'NEO4J_PASSWORD') -eq '') {
     Ok 'NEO4J_PASSWORD already set'
 }
 
-Set-EnvIfBlank 'TEXT_MODEL'  'ai/gemma4'
-Set-EnvIfBlank 'VLM_MODEL'   'ai/gemma4'
-Set-EnvIfBlank 'EMBED_MODEL' 'ai/nomic-embed-text-v1.5'
+# Sized tags, not :latest - a moving tag changes which model wrote a report with
+# nothing on the page to say so, and for embeddings it changes the vector space
+# an existing index was built in. Two models, not three: transcription asks for
+# the text model, so vision follows it.
+Set-EnvIfBlank 'TEXT_MODEL'  'ai/gemma4:12b'
+Set-EnvIfBlank 'EMBED_MODEL' 'ai/qwen3-embedding:4b'
 $AppPort = ('' + (Get-EnvValue 'APP_PORT')).Trim()
 if ($AppPort -notmatch '^[0-9]+$') { $AppPort = '8080' }
 if ("$AppPort" -eq '') { $AppPort = '8080' }
 $TextModel  = Get-EnvValue 'TEXT_MODEL'
-$VlmModel   = Get-EnvValue 'VLM_MODEL'
 $EmbedModel = Get-EnvValue 'EMBED_MODEL'
-Ok ("models: {0} (text/vision), {1} (embeddings)" -f $TextModel, $EmbedModel)
+Ok ("models: {0} (text and vision), {1} (embeddings)" -f $TextModel, $EmbedModel)
 
 # --- ports ----------------------------------------------------------------------
 # Warn about occupied ports only when the stack is not already the occupant.
@@ -384,28 +386,42 @@ Wait-Healthy 'neo4j' 240
 Wait-Healthy 'app' 180
 
 # --- models -----------------------------------------------------------------------------
-Step 'Downloading models (one time, about 8GB)'
-$haveModels = @()
-foreach ($line in @(docker model list 2>$null)) {
-    $tok = (('' + $line) -split '\s+')[0]
-    if (($tok -ne '') -and ($tok -ne 'MODEL')) { $haveModels += $tok }
+# Same policy as scripts/pull-models.sh, which PowerShell cannot run: a missing
+# embedding model is fatal, a missing text model is a warning. 'docker model
+# inspect' is the presence test - the MODEL NAME column of 'docker model list'
+# prints the short name with the ai/ prefix and the tag removed, so the
+# comparison this replaces matched no name anybody would configure and went to
+# the registry on every single start.
+Step 'Getting the models'
+function Test-HaveModel([string]$Name) {
+    docker model inspect $Name *> $null
+    return ($LASTEXITCODE -eq 0)
 }
-$pulled = @()
-foreach ($m in @($TextModel, $VlmModel, $EmbedModel)) {
+$missing = @()
+foreach ($m in @($EmbedModel, $TextModel)) {
     if ("$m" -eq '') { continue }
-    if ($pulled -contains $m) { continue }
-    $pulled += $m
-    $short = $m -replace '^docker\.io/', ''
-    if ($haveModels -contains $short) {
-        Ok "$m is already here"
-    } else {
-        docker model pull $m
-        if ($LASTEXITCODE -ne 0) {
-            Fail "Could not pull $m. Check your connection and run start.ps1 again."
-        }
-    }
+    if ($missing -contains $m) { continue }
+    if (-not (Test-HaveModel $m)) { $missing += $m }
 }
-Ok ('models ready: ' + ($pulled -join ' '))
+if ($missing.Count -gt 0) {
+    Step ('Downloading onto this machine, once, several GB: ' + ($missing -join ' '))
+    Ok 'Leave it running - each model shows its own progress below.'
+}
+function Get-Model([string]$Key, [string]$Name, [bool]$Fatal) {
+    if ("$Name" -eq '') { Ok "$Key is not set in .env - nothing to fetch for it"; return }
+    if (Test-HaveModel $Name) { Ok "${Key}: $Name is already here"; return }
+    docker model pull $Name
+    if ($LASTEXITCODE -eq 0) { Ok "${Key}: $Name is ready"; return }
+    if ($Fatal) {
+        Fail "Could not pull $Name, named by $Key in .env. Passages cannot be indexed without it, and the chat page would answer from keyword matching instead without saying so. Fix the connection and run start.ps1 again - or, to run without semantic search on purpose, leave EMBED_MODEL empty in .env."
+    }
+    Warn "Could not pull $Name, named by $Key in .env - carrying on. Documents will fail to process until it is here, unless the settings page points at another endpoint that serves a model."
+}
+# Embeddings first: a fatal failure should land before the much larger text
+# model has been downloaded.
+Get-Model 'EMBED_MODEL' $EmbedModel $true
+Get-Model 'TEXT_MODEL'  $TextModel  $false
+Ok 'models ready'
 
 # --- prove it actually answers -------------------------------------------------------------
 Step 'Checking the model answers (loads it into the GPU on first use)'

@@ -49,6 +49,12 @@ check_once() {
         say "stack is running - rebuilding and restarting"
         # --remove-orphans: a push that retires a service from the compose file
         # must also retire its running container, or it lingers forever.
+        # Models live on the host's Model Runner, not in the image, so a
+        # rebuild does not fetch them. Never fatal here: this runs unattended
+        # and must not leave a machine stopped because a registry was briefly
+        # unreachable - the app starts and reports the missing model itself.
+        ./scripts/pull-models.sh >>"$LOGFILE" 2>&1 \
+            || say "model fetch reported a problem - see $LOGFILE"
         if docker compose up -d --build --remove-orphans >>"$LOGFILE" 2>&1; then
             say "restarted on the new version"
         else

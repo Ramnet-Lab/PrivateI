@@ -158,7 +158,8 @@ fi
 # Sized tags, not :latest. A moving tag changes which model wrote a report with
 # nothing on the page to say so, and for embeddings it changes the vector space
 # an existing index was built in - which retrieves worse without ever erroring.
-# No VLM_MODEL: transcription asks for the text model, so vision follows it.
+# Two models, not three: transcription asks for the text model, so vision
+# follows it and there is no separate vision model to name.
 env_set_if_blank TEXT_MODEL  "ai/gemma4:12b"
 env_set_if_blank EMBED_MODEL "ai/qwen3-embedding:4b"
 APP_PORT="$(env_get APP_PORT)"; APP_PORT="${APP_PORT:-8080}"
@@ -246,19 +247,13 @@ wait_healthy neo4j 240
 wait_healthy app 180
 
 # --- models ---------------------------------------------------------------------
-step "Downloading models (one time, about 8GB)"
-pulled=""
-for m in "$(env_get TEXT_MODEL)" "$(env_get VLM_MODEL)" "$(env_get EMBED_MODEL)"; do
-  [ -n "$m" ] || continue
-  case " $pulled " in *" $m "*) continue ;; esac
-  pulled="$pulled $m"
-  if docker model list 2>/dev/null | awk '{print $1}' | grep -qx "${m#docker.io/}" ; then
-    ok "$m is already here"
-  else
-    docker model pull "$m" || fail "Could not pull $m. Check your connection and re-run ./start.sh"
-  fi
-done
-ok "models ready:$pulled"
+# One implementation, shared with `make pull`, so a start and a rebuild can
+# never fetch a different pair of models from each other. No `|| fail`: this
+# runs under `set -Eeuo pipefail`, so the script's own exit 1 aborts the start
+# after its ERROR block and remedy have already printed.
+step "Getting the models"
+./scripts/pull-models.sh
+ok "models ready"
 
 # --- prove it actually answers ---------------------------------------------------
 step "Checking the model answers (loads it into the GPU on first use)"
