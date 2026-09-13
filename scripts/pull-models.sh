@@ -130,3 +130,41 @@ fetch EMBED_MODEL "$EMBED_MODEL" 1
 # and when it is needed and absent, the first request already says what to
 # pull and where. Warn, never block.
 fetch TEXT_MODEL "$TEXT_MODEL" 0
+
+# --- context size ---------------------------------------------------------------
+# Model Runner applies its own default context - 4096 - and the OpenAI dialect
+# this app speaks to it has no field for asking otherwise, so TEXT_NUM_CTX is
+# never transmitted on the local path. The result is not an error. llama.cpp
+# drops the FRONT of an over-long prompt, and the front is where the
+# instructions and the answer's required shape are: the reply comes back
+# fluent, on topic and answering a question nobody asked. A report has already
+# been lost that way.
+#
+# So the runner is told, here, on every build - not by an operator who happens
+# to know the command exists. The number is read from TEXT_NUM_CTX rather than
+# written twice, because a runner sized differently from the pipeline that
+# feeds it is the same failure wearing a larger number.
+#
+# Embeddings need nothing: a passage is TARGET_CHARS 900, roughly 250 tokens,
+# so any default is ample and a bigger KV cache would only cost memory.
+CTX="$(env_get TEXT_NUM_CTX)"
+[ -n "$CTX" ] || CTX=16384
+
+if [ -n "$TEXT_MODEL" ] && have_model "$TEXT_MODEL"; then
+  if docker model configure --help >/dev/null 2>&1; then
+    if docker model configure --context-size "$CTX" "$TEXT_MODEL" >/dev/null 2>&1; then
+      say "TEXT_MODEL: context set to $CTX tokens"
+    else
+      warn "Could not set the context size for $TEXT_MODEL."
+      warn "It will run at Model Runner's default, and a prompt longer than"
+      warn "that loses its beginning silently. Try by hand:"
+      warn "  docker model configure --context-size $CTX $TEXT_MODEL"
+    fi
+  else
+    # Older Docker has no configure subcommand. Saying so is the whole value:
+    # the cap is survivable when it is known about and dangerous when it is not.
+    warn "This Docker cannot set a model's context size, so $TEXT_MODEL runs at"
+    warn "the Model Runner default. Long prompts will lose their beginning"
+    warn "without reporting it. Update Docker Desktop to fix this."
+  fi
+fi

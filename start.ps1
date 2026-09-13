@@ -421,6 +421,23 @@ function Get-Model([string]$Key, [string]$Name, [bool]$Fatal) {
 # model has been downloaded.
 Get-Model 'EMBED_MODEL' $EmbedModel $true
 Get-Model 'TEXT_MODEL'  $TextModel  $false
+
+# Model Runner applies its own default context - 4096 - and the OpenAI dialect
+# this app speaks to it has no field for asking otherwise, so TEXT_NUM_CTX never
+# reaches it. An over-long prompt is not refused: llama.cpp drops the FRONT,
+# where the instructions are, and the reply comes back fluent and wrong. Set it
+# here rather than leaving it to an operator who would have to know the command
+# exists. Embeddings need nothing - a passage is about 250 tokens.
+$Ctx = ('' + (Get-EnvValue 'TEXT_NUM_CTX')).Trim()
+if ($Ctx -notmatch '^[0-9]+$') { $Ctx = '16384' }
+if (("$TextModel" -ne '') -and (Test-HaveModel $TextModel)) {
+    docker model configure --context-size $Ctx $TextModel *> $null
+    if ($LASTEXITCODE -eq 0) {
+        Ok "TEXT_MODEL: context set to $Ctx tokens"
+    } else {
+        Warn "Could not set the context size for $TextModel. It will run at Model Runner's default, and a prompt longer than that loses its beginning silently. Try by hand: docker model configure --context-size $Ctx $TextModel"
+    }
+}
 Ok 'models ready'
 
 # --- prove it actually answers -------------------------------------------------------------
