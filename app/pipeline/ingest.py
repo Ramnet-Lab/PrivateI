@@ -207,7 +207,13 @@ def ingest_docx(src: Path, doc_id: str, on_progress) -> int:
             if any(cells):
                 parts.append(" | ".join(cells))
 
-    text = "\n".join(line for line in parts if line.strip())
+    # Blank line between paragraphs, not a single newline. Every splitter
+    # downstream reads a blank line as the paragraph boundary, and joining
+    # with one newline produced a document containing none at all: a Word
+    # file therefore arrived as a single unsplittable block, and extraction
+    # sent the whole of it in one prompt whatever its length. A 16,648
+    # character file became one chunk against a 6,000 character limit.
+    text = "\n\n".join(line for line in parts if line.strip())
     if not text.strip():
         raise RuntimeError("no readable text in this Word document")
 

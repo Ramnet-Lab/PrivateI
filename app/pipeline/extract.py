@@ -1627,12 +1627,55 @@ def validate(item: dict, page_text: str, header: str = "",
     }, ""
 
 
+def _hard_split(piece: str) -> list[str]:
+    """Cut a single oversized block down to size, on the best break available.
+
+    The paragraph splitter below can only divide text that has paragraphs in
+    it. Given one unbroken block it returns that block whole, however long, and
+    the caller sends the lot to the model in one prompt - which the endpoint
+    then truncates from whichever end it likes, silently. That is what a Word
+    document used to be, and it is what any pasted wall of text still is, so
+    the guarantee belongs here rather than in whichever reader happened to
+    produce it: no chunk leaves this function larger than the limit.
+    """
+    out: list[str] = []
+    for line in re.split(r"(?<=[.!?])\s+|\n", piece):
+        line = line.strip()
+        if not line:
+            continue
+        if len(line) > CHUNK_CHARS:
+            # A sentence longer than the whole budget - a table dumped without
+            # breaks, or prose with no terminal punctuation. Cut on words.
+            words, run = line.split(), []
+            for word in words:
+                if sum(len(w) + 1 for w in run) + len(word) > CHUNK_CHARS and run:
+                    out.append(" ".join(run)); run = []
+                run.append(word)
+            if run:
+                out.append(" ".join(run))
+            continue
+        if out and len(out[-1]) + len(line) + 1 <= CHUNK_CHARS:
+            out[-1] = f"{out[-1]} {line}"
+        else:
+            out.append(line)
+    return out
+
+
 def chunks(text: str) -> list[str]:
     if len(text) <= CHUNK_CHARS:
         return [text]
     out, current = [], []
     size = 0
     for para in text.split("\n\n"):
+        if len(para) > CHUNK_CHARS:
+            # Flush what is held, then break the oversized paragraph itself
+            # rather than appending it whole and returning a chunk nothing
+            # downstream can read.
+            if current:
+                out.append("\n\n".join(current))
+                current, size = [], 0
+            out.extend(_hard_split(para))
+            continue
         if size + len(para) > CHUNK_CHARS and current:
             out.append("\n\n".join(current))
             current, size = [], 0
