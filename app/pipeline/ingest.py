@@ -3,7 +3,8 @@
 Three paths:
   PDF with a text layer -> read the text directly, no rasterising, no OCR.
   PDF without one       -> render each page at 300 DPI, deskew, contrast.
-  .docx                 -> read the text directly.
+  .docx                 -> lay it out into a PDF and read that, then check
+                           every text unit in the file reached a page.
   image                 -> normalise the single page.
 """
 from __future__ import annotations
@@ -148,7 +149,51 @@ def _record_page(conn, doc_id: str, page_num: int, *, image: Path | None = None,
          paths.rel(text) if text else None, source, route))
 
 
-def ingest_pdf(src: Path, doc_id: str, on_progress) -> int:
+def _page_comments(page) -> str:
+    """Comment text a PDF carries as annotations rather than as page text.
+
+    A Word comment survives conversion only as a PDF /Text annotation, and
+    neither pypdf's extract_text() nor pdftotext returns one - measured, the
+    comment body is in the file and absent from every text read of it. Born
+    digital PDFs reviewed in Acrobat carry comments the same way, so this runs
+    for every PDF, not only for converted Word files.
+    """
+    found = []
+    try:
+        annots = page.get("/Annots") or []
+    except Exception:
+        return ""
+    for ref in annots:
+        try:
+            obj = ref.get_object()
+            # /Popup is the window a /Text annotation opens into and repeats
+            # its parent's contents; taking both would double every comment.
+            if obj.get("/Subtype") not in ("/Text", "/FreeText"):
+                continue
+            body = str(obj.get("/Contents") or "").strip()
+            if not body:
+                continue
+            who = str(obj.get("/T") or "").strip()
+            found.append(f"[comment{' - ' + who if who else ''}]\n{body}")
+        except Exception:
+            continue
+    return "\n\n".join(found)
+
+
+def _annex(doc_id: str, page_num: int, title: str, body: str,
+           source: str, note: str | None = None) -> None:
+    """A page for text that belongs to the document but to none of its pages."""
+    txt = write_text(doc_id, page_num, f"[{title}]\n\n{body.rstrip()}")
+    with state.tx() as conn:
+        _record_page(conn, doc_id, page_num, text=txt, source=source,
+                     route="text")
+        if note:
+            conn.execute("UPDATE pages SET error=? WHERE doc_id=? AND page_num=?",
+                         (note[:400], doc_id, page_num))
+
+
+def ingest_pdf(src: Path, doc_id: str, on_progress,
+               deferred: list | None = None) -> int:
     from pdf2image import convert_from_path
     from pypdf import PdfReader
 
@@ -169,9 +214,13 @@ def ingest_pdf(src: Path, doc_id: str, on_progress) -> int:
             except Exception:
                 text = ""
 
+        comments = _page_comments(reader.pages[page_num - 1])
+
         if len(text) >= min_chars:
             # Born-digital page: rasterising and re-reading it would be slower
             # and strictly lossier than the text already in the file.
+            if comments:
+                text = f"{text}\n\n{comments}"
             txt = write_text(doc_id, page_num, text)
             with state.tx() as conn:
                 _record_page(conn, doc_id, page_num, text=txt,
@@ -188,39 +237,186 @@ def ingest_pdf(src: Path, doc_id: str, on_progress) -> int:
             arr = cv2.cvtColor(np.array(images[0].convert("RGB")), cv2.COLOR_RGB2BGR)
             write_page_image(doc_id, page_num, arr)
             del images, arr
+        if comments and deferred is not None:
+            # This page has no text of its own yet and OCR will overwrite the
+            # transcript when it runs - ocr.py selects on route IS NULL
+            # regardless of text_path - so the comment is carried out of here
+            # and written where nothing can clobber it.
+            deferred.append((page_num, comments))
+
         with state.tx() as conn:
             _record_page(conn, doc_id, page_num,
                          image=paths.page_image(doc_id, page_num))
     return page_count
 
 
-def ingest_docx(src: Path, doc_id: str, on_progress) -> int:
-    """Word text, including tables, which often carry the actual details."""
-    from docx import Document as DocxDocument
+def ingest_word(src: Path, doc_id: str, on_progress) -> int:
+    """Lay the Word file out into pages, read those, then prove nothing went.
 
-    on_progress("reading document text")
-    document = DocxDocument(str(src))
-    parts: list[str] = [p.text for p in document.paragraphs]
-    for table in document.tables:
-        for row in table.rows:
-            cells = [c.text.strip() for c in row.cells]
-            if any(cells):
-                parts.append(" | ".join(cells))
+    A .docx has no pages until something lays it out, which is why reading its
+    XML made every citation say p.1. So it is rendered and read as a PDF, and
+    the rendering carries the headers, footers, footnotes, list numbers and
+    field values that no XML read can produce, on the page they belong to.
 
-    # Blank line between paragraphs, not a single newline. Every splitter
-    # downstream reads a blank line as the paragraph boundary, and joining
-    # with one newline produced a document containing none at all: a Word
-    # file therefore arrived as a single unsplittable block, and extraction
-    # sent the whole of it in one prompt whatever its length. A 16,648
-    # character file became one chunk against a 6,000 character limit.
-    text = "\n\n".join(line for line in parts if line.strip())
-    if not text.strip():
-        raise RuntimeError("no readable text in this Word document")
+    A renderer prints the DISPLAY view, so the file is also read directly, and
+    the two are reconciled. Whatever the file holds and no rendered page
+    carries is written to an annex page rather than dropped. That is what turns
+    "conversion probably gets everything" into a per-document check.
+    """
+    from . import docx_audit, docx_xml
 
-    txt = write_text(doc_id, 1, text)
-    with state.tx() as conn:
-        _record_page(conn, doc_id, 1, text=txt, source="docx", route="text")
-    return 1
+    on_progress("reading the Word file itself")
+    read = None
+    belt_error = ""
+    try:
+        read = docx_xml.read_docx(
+            src, estimate_budget=env_int("DOCX_ESTIMATED_PAGE_CHARS", 2800))
+    except Exception as exc:
+        belt_error = str(exc)
+        log.error("%s: reading the .docx XML failed: %s", doc_id, exc)
+
+    pdf = None
+    prepared_ok = False
+    convert_error = ""
+    if env_bool("DOCX_CONVERT", True):
+        from . import docx_convert, docx_prep
+        render_from = src
+        on_progress("preparing the Word file")
+        try:
+            changed = docx_prep.prepare(src, paths.prepared_docx(doc_id))
+            render_from = paths.prepared_docx(doc_id)
+            prepared_ok = True
+            log.info("%s: unhid %d suppressed construct(s)", doc_id, changed)
+        except Exception as exc:
+            # Rendering the file as it stands is still better than not
+            # rendering it. Deleted and hidden text is then force-annexed
+            # below, because the page may be carrying it with no mark on it.
+            log.warning("%s: docx_prep failed: %s", doc_id, exc)
+        on_progress("laying the Word file out into pages")
+        try:
+            pdf = docx_convert.convert(render_from, doc_id)
+        except Exception as exc:
+            convert_error = str(exc)
+            log.error("%s: conversion failed: %s", doc_id, exc)
+
+    notes: list[str] = []
+    annex: list[str] = []
+
+    if pdf is None:
+        # No rendering. The file is still read, and with its own page numbers
+        # where Word recorded them - which is the whole reason this fallback is
+        # the XML reader and not a flat dump onto page 1.
+        if read is None:
+            raise RuntimeError(
+                f"this Word file could not be laid out "
+                f"({convert_error or 'conversion off'}) and its own XML could "
+                f"not be read either ({belt_error})")
+        reason = convert_error or "conversion is switched off"
+        for index, body in enumerate(read.pages, 1):
+            txt = write_text(doc_id, index, body)
+            with state.tx() as conn:
+                _record_page(conn, doc_id, index, text=txt, route="text",
+                             source={"word": "docx_word_pages",
+                                     "explicit": "docx_page_breaks",
+                                     "estimated": "docx_estimated_pages"}
+                             .get(read.basis, "docx"))
+        page_count = len(read.pages)
+        annex.extend(read.annex)
+        notes.extend(read.warnings)
+        notes.append(f"Word file: this file could not be laid out into pages "
+                     f"({reason}), so it was read from its own XML instead")
+    else:
+        deferred: list[tuple[int, str]] = []
+        page_count = ingest_pdf(pdf, doc_id, on_progress, deferred=deferred)
+        on_progress("checking nothing was dropped")
+        rendered, unread = [], 0
+        for index in range(1, page_count + 1):
+            found = paths.transcript_txt(doc_id, index)
+            if found.exists():
+                rendered.append(found.read_text(encoding="utf-8"))
+            else:
+                unread += 1
+        rendered.extend(text for _, text in deferred)
+        if deferred:
+            annex.append("\n\n".join(f"page {n}:\n{t}" for n, t in deferred))
+
+        try:
+            hay = docx_audit.haystack(rendered)
+            missing = docx_audit.residue(src, hay,
+                                         report_deleted=not prepared_ok)
+            fields = [(p, t) for p, k, t in docx_audit.units(src)
+                      if k == "field"]
+        except Exception as exc:
+            hay, missing, fields = "", [], []
+            notes.append(f"Word file: the check for dropped text could not run "
+                         f"({exc}), so nothing verified the conversion")
+            log.warning("%s: docx_audit failed: %s", doc_id, exc)
+
+        if missing:
+            annex.append("\n\n".join(f"{part} [{kind}]:\n{frag}"
+                                      for part, kind, frag in missing))
+            notes.append(f"Word file: {len(missing)} passage(s) present in the "
+                         f"file did not appear on any rendered page")
+        if fields:
+            annex.append("\n".join(f"[field] {t.strip()}" for _, t in fields))
+        if read is not None and hay:
+            # Keep only the blocks a rendering cannot carry. Headers and
+            # footers print on every page and are already there; document
+            # properties, external link targets, embedded-object text and
+            # anything the structured walk did not claim are not.
+            for block in read.annex:
+                if docx_audit.fragments_missing(block, hay):
+                    annex.append(block)
+            notes.extend(read.warnings)
+            if read.word_pages and read.word_pages != page_count:
+                notes.append(
+                    f"Word file: Word recorded {read.word_pages} page(s) in "
+                    f"this file and the layout used here produced "
+                    f"{page_count}; page numbers may be one or two out from "
+                    f"what the author saw")
+        if not prepared_ok and env_bool("DOCX_CONVERT", True):
+            notes.append("Word file: the file could not be rewritten before "
+                         "rendering, so a rendered page may carry deleted or "
+                         "hidden text without marking it as such; every such "
+                         "passage is on the annex page, labelled")
+        if belt_error:
+            notes.append(f"Word file: the file's XML could not be read "
+                         f"({belt_error}), so nothing verified the conversion")
+        if unread:
+            notes.append(f"Word file: {unread} page(s) carried no text layer, "
+                         f"so what is only on them is unchecked until OCR has run")
+
+    if annex:
+        page_count += 1
+        _annex(doc_id, page_count,
+               "Text this Word file holds that none of its pages print - "
+               "this is not a page of the document",
+               "\n\n".join(a for a in annex if a.strip()),
+               "docx_annex",
+               note=notes[0] if notes else None)
+
+    # Pictures pasted into a Word file are the one text class no XML walk can
+    # read. They are written after the annex with route left NULL, which is
+    # exactly what ocr.py selects on, so a scan pasted into a Word file gets
+    # OCR and, when OCR is dirty, the vision model.
+    if read is not None:
+        floor = env_int("DOCX_PICTURE_MIN_SIDE", 400)
+        try:
+            for name, blob in docx_xml.iter_images(src):
+                arr = cv2.imdecode(np.frombuffer(blob, np.uint8),
+                                   cv2.IMREAD_COLOR)
+                if arr is None or min(arr.shape[:2]) < floor:
+                    continue
+                page_count += 1
+                dest = write_page_image(doc_id, page_count, arr)
+                with state.tx() as conn:
+                    _record_page(conn, doc_id, page_count, image=dest)
+        except Exception as exc:
+            log.warning("%s: reading embedded pictures failed: %s", doc_id, exc)
+
+    for note in notes:
+        log.info("%s: %s", doc_id, note)
+    return page_count
 
 
 def ingest_image(src: Path, doc_id: str, on_progress) -> int:
@@ -322,9 +518,19 @@ def run(doc_id: str, on_progress) -> int:
     suffix = src.suffix.lower()
 
     if suffix in paths.SUPPORTED_PDF:
-        page_count = ingest_pdf(src, doc_id, on_progress)
+        # A comment on a page that carries no text of its own would be
+        # overwritten by OCR, so it is carried out and annexed instead.
+        deferred: list[tuple[int, str]] = []
+        page_count = ingest_pdf(src, doc_id, on_progress, deferred=deferred)
+        if deferred:
+            page_count += 1
+            _annex(doc_id, page_count,
+                   "Comments on pages that carry no text of their own - "
+                   "this is not a page of the document",
+                   "\n\n".join(f"page {n}:\n{t}" for n, t in deferred),
+                   "pdf_comments")
     elif suffix in paths.SUPPORTED_DOC:
-        page_count = ingest_docx(src, doc_id, on_progress)
+        page_count = ingest_word(src, doc_id, on_progress)
     else:
         page_count = ingest_image(src, doc_id, on_progress)
 

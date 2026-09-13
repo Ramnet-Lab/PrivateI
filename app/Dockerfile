@@ -2,12 +2,30 @@ FROM python:3.12-slim
 
 # poppler-utils renders PDF pages; tesseract reads printed text and decides
 # which pages need the vision model; libglib2.0-0 is the opencv runtime.
+# libreoffice-writer-nogui lays a Word file out into pages, which is the only
+# way a .docx gets page numbers a citation can point at, and the only thing
+# that computes list numbering and field values the file does not store. The
+# three font packages are metric-compatible with Arial/Times/Courier, Calibri
+# and Cambria: without them the renderer substitutes, lines break elsewhere and
+# the pagination drifts further from what the author saw in Word.
+#
+# Writer only, and no JRE. The full libreoffice suite and a JVM would roughly
+# double this again for Calc and Impress nothing here opens. The recurring
+# "failed to launch javaldx" on stderr is cosmetic - conversions still succeed.
+# Measured: 807MB -> 1.17GB.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         poppler-utils \
         tesseract-ocr \
         tesseract-ocr-eng \
         libglib2.0-0 \
         curl \
+        libreoffice-writer-nogui \
+        fonts-liberation2 \
+        fonts-crosextra-carlito \
+        fonts-crosextra-caladea \
+    && rm -rf /usr/lib/libreoffice/share/gallery \
+              /usr/lib/libreoffice/share/template \
+              /usr/lib/libreoffice/share/config/images_colibre*.zip \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

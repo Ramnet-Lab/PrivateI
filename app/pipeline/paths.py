@@ -58,6 +58,25 @@ def transcript_txt(doc_id: str, page_num: int) -> Path:
     return TEXT / doc_id / f"page_{page_num:04d}.txt"
 
 
+def converted_pdf(doc_id: str) -> Path:
+    """The PDF a Word file was laid out into.
+
+    Under the document's own page directory rather than in 01_raw, and
+    deliberately: delete_document, _reset_document and the purge all clear that
+    directory already, so the rendering goes when the document goes and is
+    rebuilt when the document is re-ingested - which is what makes a fix to the
+    conversion reach documents that are already in the case. 01_raw then holds
+    only what the operator actually uploaded, which is what the purge rules
+    there assume.
+    """
+    return PAGES / doc_id / "converted.pdf"
+
+
+def prepared_docx(doc_id: str) -> Path:
+    """The rewritten copy that is handed to the renderer, never the original."""
+    return PAGES / doc_id / "prepared.docx"
+
+
 def rel(p: Path | str) -> str:
     p = Path(p)
     try:
