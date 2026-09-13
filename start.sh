@@ -155,11 +155,14 @@ else
   ok "NEO4J_PASSWORD already set"
 fi
 
-env_set_if_blank TEXT_MODEL  "ai/gemma4"
-env_set_if_blank VLM_MODEL   "ai/gemma4"
-env_set_if_blank EMBED_MODEL "ai/nomic-embed-text-v1.5"
+# Sized tags, not :latest. A moving tag changes which model wrote a report with
+# nothing on the page to say so, and for embeddings it changes the vector space
+# an existing index was built in - which retrieves worse without ever erroring.
+# No VLM_MODEL: transcription asks for the text model, so vision follows it.
+env_set_if_blank TEXT_MODEL  "ai/gemma4:12b"
+env_set_if_blank EMBED_MODEL "ai/qwen3-embedding:4b"
 APP_PORT="$(env_get APP_PORT)"; APP_PORT="${APP_PORT:-8080}"
-ok "models: $(env_get TEXT_MODEL) (text/vision), $(env_get EMBED_MODEL) (embeddings)"
+ok "models: $(env_get TEXT_MODEL) (text and vision), $(env_get EMBED_MODEL) (embeddings)"
 
 # --- ports ------------------------------------------------------------------
 port_busy() {

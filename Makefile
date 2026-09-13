@@ -46,9 +46,13 @@ status:
 models:
 	@docker model list 2>/dev/null || echo "Model Runner is not on - run ./start.sh"
 
+# Two models, not three: transcription asks for the text model, so there is no
+# separate vision model to fetch. VLM_MODEL is read by nothing.
 pull:
-	@docker model pull $$(grep '^TEXT_MODEL=' .env | cut -d= -f2)
-	@docker model pull $$(grep '^EMBED_MODEL=' .env | cut -d= -f2)
+	@for m in $$(grep -hE '^(TEXT_MODEL|EMBED_MODEL)=' .env \
+	              | cut -d= -f2 | sort -u); do \
+	    echo "pulling $$m"; docker model pull "$$m"; \
+	  done
 
 reset:
 	@read -r -p "Delete every uploaded document and empty the graph? [y/N] " ok; \
