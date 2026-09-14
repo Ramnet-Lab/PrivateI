@@ -48,7 +48,7 @@ _PARTS = ("word/settings.xml", "word/document.xml", "word/header",
 _ON = (None, "true", "1", "on")
 
 
-def _label(el, opening: str, closing: str = "]") -> None:
+def _label(el, opening: str, closing: str = ">>") -> None:
     """Bracket the text this element carries, in document order.
 
     One opening mark on the first text node and one closing mark on the last,
@@ -86,7 +86,7 @@ def _rewrite(root, mark: bool) -> int:
         if parent is None:
             continue
         if mark:
-            _label(dele, "[struck: ")
+            _label(dele, "<<struck: ")
         for dt in dele.iter(f"{W}delText"):
             dt.tag = f"{W}t"
         at = list(parent).index(dele)
@@ -111,7 +111,7 @@ def _rewrite(root, mark: bool) -> int:
             run = rpr.getparent()
             rpr.remove(prop)
             if mark and run is not None and run.tag == f"{W}r":
-                _label(run, "[hidden: ")
+                _label(run, "<<hidden: ")
             changed += 1
     return changed
 

@@ -174,7 +174,13 @@ def _page_comments(page) -> str:
             if not body:
                 continue
             who = str(obj.get("/T") or "").strip()
-            found.append(f"[comment{' - ' + who if who else ''}]\n{body}")
+            # No square brackets. A bracket is this system's citation language -
+            # report.py's _CITE harvests "[...]" out of a finding - so a label
+            # in that shape sits in the page text inviting the model to copy
+            # the form into a finding, where it is then read as a citation
+            # naming no document. Angle marks carry the same weight to a reader
+            # and no weight at all to the parser.
+            found.append(f"<<comment{' - ' + who if who else ''}>>\n{body}")
         except Exception:
             continue
     return "\n\n".join(found)
@@ -183,7 +189,7 @@ def _page_comments(page) -> str:
 def _annex(doc_id: str, page_num: int, title: str, body: str,
            source: str, note: str | None = None) -> None:
     """A page for text that belongs to the document but to none of its pages."""
-    txt = write_text(doc_id, page_num, f"[{title}]\n\n{body.rstrip()}")
+    txt = write_text(doc_id, page_num, f"<<{title}>>\n\n{body.rstrip()}")
     with state.tx() as conn:
         _record_page(conn, doc_id, page_num, text=txt, source=source,
                      route="text")
