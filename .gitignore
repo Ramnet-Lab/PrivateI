@@ -8,3 +8,5 @@ __pycache__/
 docker-compose.override.yml
 .auto-update.pid
 auto-update.log
+# Generated reports and scores, kept for comparison between runs.
+eval/out/
