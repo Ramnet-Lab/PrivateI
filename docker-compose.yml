@@ -35,7 +35,12 @@ services:
       # meant to be verbatim, and sampling there invents readings.
       TEXT_TEMPERATURE: ${TEXT_TEMPERATURE:-0}
       VLM_NUM_CTX: ${VLM_NUM_CTX:-8192}
-      TEXT_NUM_CTX: ${TEXT_NUM_CTX:-16384}
+      # Must match the top of the ladder in scripts/pull-models.sh, which
+      # configures the runner itself. On the local path this sizes no prompt -
+      # the OpenAI dialect has no field for it - so it states what this app
+      # expects. On the native Ollama path it IS sent, as num_ctx.
+      TEXT_NUM_CTX: ${TEXT_NUM_CTX:-131072}
+      EMBED_NUM_CTX: ${EMBED_NUM_CTX:-8192}
       DOCX_CONVERT: ${DOCX_CONVERT:-1}
       DOCX_CONVERT_TIMEOUT: ${DOCX_CONVERT_TIMEOUT:-300}
       DOCX_ESTIMATED_PAGE_CHARS: ${DOCX_ESTIMATED_PAGE_CHARS:-2800}

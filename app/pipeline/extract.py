@@ -17,7 +17,8 @@ from . import llm_settings, paths, state
 from .config import env_int
 from .entities import RANKS, entity_id, normalize
 from .log import get_logger, utcnow
-from .model_client import Ollama, default_options, thinking_enabled
+from .model_client import (ContextOverflow, Ollama, default_options,
+                           thinking_enabled)
 from .prompts_extract import ENTITY_TYPES, build as build_prompt
 
 log = get_logger("extract")
@@ -1840,6 +1841,13 @@ def run(doc_id: str, on_progress) -> tuple[int, int]:
             try:
                 data = client.generate(model, user, system=system, options=options,
                                        format_json=True, think=thinking_enabled())
+            except ContextOverflow:
+                # Not this chunk's fault and not survivable by skipping: every
+                # remaining chunk would fail the same way, and the document
+                # would finish marked done with a hole in the evidence that
+                # nothing downstream can see. runner.py catches this as an
+                # OllamaError and ends the document visibly instead.
+                raise
             except Exception as exc:
                 log.error("%s p%s: %s", doc_id, row["page_num"], exc)
                 continue

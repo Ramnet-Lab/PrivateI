@@ -100,6 +100,27 @@ class ModelMissing(ModelRunnerError):
     pass
 
 
+class ContextOverflow(ModelRunnerError):
+    """The prompt was longer than the window the server will hold.
+
+    Its own class because it is the one model error that skipping makes worse.
+    Every other failure is per-request: the next page, the next draw, the next
+    allegation may well succeed, so a caller that logs and carries on loses one
+    item. This one is a property of how the run is configured, so every
+    remaining call fails the same way - and a caller that carries on finishes
+    the document marked done with a hole in the evidence that nothing
+    downstream can see.
+
+    Carries both numbers, because "too long" without them tells an operator
+    nothing they can act on.
+    """
+
+    def __init__(self, message: str, sent: int = 0, window: int = 0) -> None:
+        super().__init__(message)
+        self.sent = sent
+        self.window = window
+
+
 class ReasoningStarvation(ModelRunnerError):
     """All output tokens went to reasoning; the answer never arrived."""
 
@@ -811,8 +832,10 @@ class ModelRunner:
         return b"".join(pieces)
 
     def _raise_api_error(self, status: int, body: bytes) -> None:
+        detail_raw: dict = {}
         try:
             detail = json.loads(body)
+            detail_raw = detail if isinstance(detail, dict) else {}
             error = detail.get("error")
             # Ollama's native API reports the error as a bare string where the
             # OpenAI dialect nests a message inside an object. Reading only the
@@ -829,6 +852,26 @@ class ModelRunner:
         # settings page match on the error type, and operators have seen this
         # wording before.
         text = f"Model Runner rejected the request ({status}): {message}"
+        # llama.cpp ships with context shift disabled, so an over-long prompt
+        # is refused before any prefill rather than having its front dropped.
+        # That refusal is the only honest signal this pipeline gets about the
+        # window, and it names both numbers - which is worth raising as its own
+        # type so a caller cannot mistake it for a transient failure and skip
+        # the page.
+        if status == 400 and ("exceed_context_size" in str(detail_raw)
+                              or "exceeds the available context" in message):
+            sent = window = 0
+            try:
+                sent = int(detail_raw.get("n_prompt_tokens") or 0)
+                window = int(detail_raw.get("n_ctx") or 0)
+            except Exception:
+                pass
+            raise ContextOverflow(
+                f"the prompt was {sent or 'too many'} tokens and this model is "
+                f"loaded with a window of {window or 'fewer'}. Nothing was "
+                f"read. Raise it with: docker model configure --context-size "
+                f"<tokens> <model>, or set TEXT_NUM_CTX in .env and rebuild.",
+                sent=sent, window=window)
         if self.is_ollama and "think" in message.lower():
             # Ollama grew its "think" field in 0.9. Older servers ignore an
             # unknown field, and newer ones reject it for models that cannot

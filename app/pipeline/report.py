@@ -58,7 +58,8 @@ import re
 
 from . import chat, embed, evidence, graph, links, llm_settings, state
 from .log import get_logger, utcnow
-from .model_client import (Ollama, default_options, random_seed,
+from .model_client import (ContextOverflow, Ollama, default_options,
+                           random_seed,
                            thinking_enabled)
 
 log = get_logger("report")
@@ -2941,6 +2942,12 @@ def generate(goal: str | None = None, allegations: list[str] | None = None, *,
                     options=short_options if attempt == 1 else retry_short,
                     think=thinking_enabled())
                 raw_elements = (answer.get("response") or "").strip()
+            except ContextOverflow as exc:
+                # An allegation decomposed from a prompt the model never read
+                # is decomposed from nothing, and the elements it produces
+                # decide the disposition.
+                yield "error", str(exc).splitlines()[0]
+                return
             except Exception as exc:
                 log.warning("element pass failed for allegation %d on attempt "
                             "%d: %s", index, attempt, exc)
@@ -2986,6 +2993,13 @@ def generate(goal: str | None = None, allegations: list[str] | None = None, *,
                     found.get("response") or "", document_names)
                 conflict_draws.append(one)
                 corroboration_draws.append(two)
+            except ContextOverflow as exc:
+                # A comparison the model never saw is not a draw that found
+                # nothing. Pooling it with the others reports an absence of
+                # contradictions that was never looked for, which is the worst
+                # thing this pass can say.
+                yield "error", str(exc).splitlines()[0]
+                return
             except Exception as exc:
                 log.warning("conflict pass %d failed for allegation %d: %s",
                             draw + 1, index, exc)

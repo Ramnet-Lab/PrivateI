@@ -131,40 +131,74 @@ fetch EMBED_MODEL "$EMBED_MODEL" 1
 # pull and where. Warn, never block.
 fetch TEXT_MODEL "$TEXT_MODEL" 0
 
-# --- context size ---------------------------------------------------------------
-# Model Runner applies its own default context - 4096 - and the OpenAI dialect
-# this app speaks to it has no field for asking otherwise, so TEXT_NUM_CTX is
-# never transmitted on the local path. The result is not an error. llama.cpp
-# drops the FRONT of an over-long prompt, and the front is where the
-# instructions and the answer's required shape are: the reply comes back
-# fluent, on topic and answering a question nobody asked. A report has already
-# been lost that way.
+# --- runner context size --------------------------------------------------------
+# Model Runner has no small fixed default. Measured on a machine with no runtime
+# config at all, it loads each model at that model's OWN trained size:
+# ai/gemma4:12b at 262144, ai/qwen3-embedding:4b at 40960. So a number written
+# here does not remove a ceiling - it imposes one, and the reason to impose one
+# is memory. The KV cache is allocated eagerly at load, so a window costs its
+# full size even on short prompts.
 #
-# So the runner is told, here, on every build - not by an operator who happens
-# to know the command exists. The number is read from TEXT_NUM_CTX rather than
-# written twice, because a runner sized differently from the pipeline that
-# feeds it is the same failure wearing a larger number.
+# Nor does this backend truncate. llama.cpp ships with context shift disabled,
+# so an over-long request comes back as HTTP 400 exceed_context_size_error
+# naming both numbers, measured at 0.064s before any prefill. The danger here is
+# a window too SMALL for a real prompt, not a window that eats one silently.
 #
-# Embeddings need nothing: a passage is TARGET_CHARS 900, roughly 250 tokens,
-# so any default is ample and a bigger KV cache would only cost memory.
+# The budget, measured on this pipeline: real prompts run 15k-78k tokens, so
+# 131072 covers the largest observed with room to spare at about 11 GiB
+# resident. The embedder is the one that was actually wasting memory - 40960
+# tokens of cache to embed passages of roughly 250 - so capping it at 8192
+# frees more than the text model gains. Net, the pair costs LESS than the
+# defaults did.
 CTX="$(env_get TEXT_NUM_CTX)"
-[ -n "$CTX" ] || CTX=16384
-
-if [ -n "$TEXT_MODEL" ] && have_model "$TEXT_MODEL"; then
-  if docker model configure --help >/dev/null 2>&1; then
-    if docker model configure --context-size "$CTX" "$TEXT_MODEL" >/dev/null 2>&1; then
-      say "TEXT_MODEL: context set to $CTX tokens"
-    else
-      warn "Could not set the context size for $TEXT_MODEL."
-      warn "It will run at Model Runner's default, and a prompt longer than"
-      warn "that loses its beginning silently. Try by hand:"
-      warn "  docker model configure --context-size $CTX $TEXT_MODEL"
-    fi
-  else
-    # Older Docker has no configure subcommand. Saying so is the whole value:
-    # the cap is survivable when it is known about and dangerous when it is not.
-    warn "This Docker cannot set a model's context size, so $TEXT_MODEL runs at"
-    warn "the Model Runner default. Long prompts will lose their beginning"
-    warn "without reporting it. Update Docker Desktop to fix this."
+if [ -z "$CTX" ]; then
+  # No explicit value: size it from this machine rather than assuming a laptop.
+  total_kb=$(awk '/MemTotal/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
+  [ "$total_kb" -gt 0 ] 2>/dev/null || total_kb=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1024 ))
+  gib=$(( total_kb / 1024 / 1024 ))
+  if   [ "$gib" -ge 32 ]; then CTX=131072
+  elif [ "$gib" -ge 24 ]; then CTX=65536
+  elif [ "$gib" -ge 16 ]; then CTX=32768
+  else                         CTX=16384
   fi
+  say "sizing the context from ${gib}GB of RAM: $CTX tokens"
 fi
+ECTX="$(env_get EMBED_NUM_CTX)"
+[ -n "$ECTX" ] || ECTX=8192
+
+set_ctx() {                     # set_ctx MODEL SIZE MODE LABEL
+  name="$1"; size="$2"; mode="$3"; label="$4"
+  [ -n "$name" ] || return 0
+  have_model "$name" || return 0
+  if ! docker model configure --help >/dev/null 2>&1; then
+    warn "This Docker cannot set a model's context size, so $name loads at its"
+    warn "own trained context. That is not a cap - it may be far larger than"
+    warn "needed and cost gigabytes of cache. Update Docker Desktop to size it."
+    return 0
+  fi
+  # Skip when it already matches: configuring reloads several gigabytes of
+  # weights, and a build should not pay that to write the number it already has.
+  #
+  # Keyed on the MODE, not the model name. Model Runner records the config
+  # against the blob, and two tags can share one - ai/gemma4:12b is stored as
+  # docker.io/ai/gemma4:latest because they are the same bytes - so a name
+  # match finds nothing and the build reconfigures every time. One entry per
+  # mode is exactly what this script writes, so the mode identifies it.
+  current=$(docker model configure show 2>/dev/null | awk -v want="$mode" '
+    /"Mode":/       { m=$0; sub(/.*"Mode": *"/,"",m); sub(/".*/,"",m) }
+    /"context-size":/ { if (m==want) { c=$0; gsub(/[^0-9]/,"",c); print c; exit } }')
+  if [ "$current" = "$size" ]; then
+    say "$label: context already $size tokens"
+    return 0
+  fi
+  if docker model configure --context-size "$size" --mode "$mode" "$name" >/dev/null 2>&1; then
+    say "$label: context set to $size tokens"
+  else
+    warn "Could not set the context size for $name. It will load at its own"
+    warn "trained context. Try by hand:"
+    warn "  docker model configure --context-size $size --mode $mode $name"
+  fi
+}
+
+set_ctx "$TEXT_MODEL"  "$CTX"  completion TEXT_MODEL
+set_ctx "$EMBED_MODEL" "$ECTX" embedding  EMBED_MODEL
