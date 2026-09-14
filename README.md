@@ -174,12 +174,49 @@ terminates the Ollama server process rather than returning an error.
 ## Everyday commands
 
 ```bash
-make up        # start (also rebuilds if code changed)
+make up        # start (fetches models, rebuilds if code changed)
+make pull      # fetch the models named in .env, and size their context
 make logs      # follow what the processor is doing
 make down      # stop
-make models    # what Ollama has installed
+make models    # what Model Runner has installed
 make reset     # delete every document and empty the graph
 ```
+
+## Updating an installation
+
+Run `./start.sh` again (`.\start.ps1` on Windows). It fast-forwards the
+repository to `origin/main`, rebuilds the image, restarts the stack, fetches any
+model the new version names, sizes the context, and proves the model answers
+before it says Ready. Your documents, graph and settings survive all of it —
+nothing under `data/` is touched. `make up` does the same minus the `git pull`,
+for when you have your own changes on disk.
+
+One thing it deliberately does **not** do: change a model you have already
+chosen. `start.sh` only fills a blank key in `.env`, so an installation set up
+before a default changed keeps what it was set up with. That restraint is on
+purpose for `EMBED_MODEL` — the model that built an index is the only one whose
+vectors that index can be searched with, so swapping it under an existing corpus
+would quietly degrade every answer to keyword matching.
+
+To move an existing installation onto the current defaults:
+
+```bash
+# text model: safe to change at any time, nothing stored depends on it
+sed -i '' 's|^TEXT_MODEL=.*|TEXT_MODEL=ai/gemma4:12b|' .env      # GNU sed: drop the ''
+
+# embedding model: changes the vector width, so re-index afterwards
+sed -i '' 's|^EMBED_MODEL=.*|EMBED_MODEL=ai/qwen3-embedding:4b|' .env
+./start.sh
+```
+
+then open the Chat page, which will say how many passages were indexed with the
+old model, and click **Re-index passages**. That rebuilds them from the page
+text already on disk — no re-OCR, and the vision model is never called. The
+count of stale passages drops to zero when it is done.
+
+Compare your `.env` against `.env.example` after an update to see what else is
+new; every key there has a default in `docker-compose.yml`, so anything you have
+not set simply takes the shipped value.
 
 ## Where things are kept
 
