@@ -88,6 +88,32 @@ def same_model(a: str, b: str) -> bool:
     return stem(a) == stem(b)
 
 
+def _untagged_or_latest(name: str) -> bool:
+    """Has this endpoint declined to say which build of a model it holds?"""
+    tail = (name or "").rsplit("/", 1)[-1]
+    return ":" not in tail or tail.endswith(":latest")
+
+
+def same_repository(a: str, b: str) -> bool:
+    """Same model repository, whatever tag each name carries.
+
+    Model Runner lists ONE name per blob. A blob carrying two tags - which is
+    what happens when the same weights are pulled twice under different names -
+    is advertised under whichever it was first given, so an endpoint that
+    answers perfectly well to ai/gemma4:12b lists only ai/gemma4:latest.
+    Measured: /v1/models offers docker.io/ai/gemma4:latest, the blob's tags are
+    ['docker.io/ai/gemma4:latest', 'docker.io/ai/gemma4:12b'], and a chat
+    request naming the 12b tag returns 200.
+    """
+    def repo(name: str) -> str:
+        name = (name or "").strip()
+        for prefix in ("docker.io/", "registry-1.docker.io/"):
+            if name.startswith(prefix):
+                name = name[len(prefix):]
+        return name.rsplit(":", 1)[0] if ":" in name.rsplit("/", 1)[-1] else name
+    return bool(repo(a)) and repo(a) == repo(b)
+
+
 class ModelRunnerError(RuntimeError):
     pass
 
@@ -1080,6 +1106,30 @@ class ModelRunner:
                    else "Set it in .env and restart.\n")
                 + f"{self.url} serves:\n  " + listing)
         if not any(self._same_model(model, have) for have in installed):
+            # The listing is not the whole truth. It carries one name per blob,
+            # so a model pulled under two tags is advertised under one of them
+            # and answers to both - and refusing a name the endpoint will serve
+            # sends an operator to fix a configuration that is already correct.
+            # A different tag of the SAME repository is therefore accepted and
+            # said out loud, while an unknown repository still fails: a typo or
+            # a model nobody pulled has nothing here to match.
+            # Only where the endpoint's own name is ambiguous. A blob listed
+            # as repo:latest, or with no tag at all, has told us nothing about
+            # which build it is, and it may well answer to the tag configured
+            # here. A blob listed as repo:31b has told us exactly what it is,
+            # and quietly serving it to a caller who asked for repo:12b would
+            # put a model name on a stored report that did not write it.
+            alias = next((have for have in installed
+                          if same_repository(model, have)
+                          and _untagged_or_latest(have)), None)
+            if alias:
+                log.warning("%s is not listed by %s, which offers %s from the "
+                            "same repository. One name is listed per model, so "
+                            "a model pulled under two tags shows only one - "
+                            "proceeding with the configured name, which this "
+                            "endpoint may or may not resolve to the same "
+                            "weights.", model, self.url, alias)
+                return model
             # The first line already names up to six; spelling the list out
             # again below only earns its space when it was truncated there.
             full = (f"\n{self.url} serves:\n  " + listing
