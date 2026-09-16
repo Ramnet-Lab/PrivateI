@@ -8,13 +8,21 @@
    prevent is an operator believing a choice took effect when only half of it
    did. It is the first thing on the page for the same reason. #}
 {% if cfg.is_external %}
-<p class="notice {% if not cfg.url.value or not cfg.model.value %}bad{% endif %}" id="in-force">
+<p class="notice {% if not cfg.url.value or not cfg.model.value or cfg.service_token.is_half %}bad{% endif %}" id="in-force">
   <strong>In force: an external endpoint.</strong>
   {{ cfg.url.value or 'no address saved' }} serving
   {{ cfg.model.value or 'no model name' }}, spoken to as
   {% if cfg.is_ollama_api %}an Ollama server, over its native API{% else %}an OpenAI-compatible server{% endif %}.
+  {% if cfg.service_token_in_force %}
+  It is reached through Cloudflare Access: a service token is sent with every
+  call, in addition to the API key.
+  {% endif %}
   {% if not cfg.url.value or not cfg.model.value %}
   Every text call fails until both an address and a model name are saved below.
+  {% elif cfg.service_token.is_half %}
+  Every text call fails until the Cloudflare Access service token below has both
+  halves: one header of a pair is answered with a sign-in page rather than an
+  answer.
   {% else %}
   Document text is sent there.
   {% endif %}
@@ -130,10 +138,70 @@
          placeholder="leave empty to keep the stored key">
   <p class="small" id="key-live">Stored key: {{ cfg.api_key.masked or 'none' }} &mdash;
     <span class="tag">{{ cfg.api_key.source }}</span></p>
+
+  {# Cloudflare Access is a door in front of somebody else's endpoint, and it is
+     satisfied by a different credential than the endpoint itself. These two
+     headers are read by Cloudflare and never reach the model server; the API
+     key above is read by the model server and means nothing to Cloudflare. An
+     operator handed a service token has been handed both halves of one thing,
+     which is why they are stored, cleared and refused together: one header
+     alone is not a weaker attempt, it is a request Cloudflare answers with a
+     sign-in page, and a page arriving where JSON was expected is a failure
+     nothing further down this pipeline can read. #}
+  <div id="cf-access" style="border-top: 1px solid var(--line);
+       margin: 14px 0 0; padding-top: 10px">
+
+    <p class="small" style="margin: 0 0 6px"><strong>Cloudflare Access service
+      token &mdash; only if this endpoint sits behind Cloudflare</strong></p>
+
+    <p class="note small">
+      Some endpoints cannot be reached directly: a Cloudflare tunnel stands in
+      front and asks every caller who it is before letting the request through.
+      A service token is how a program gets past that door &mdash; a client id
+      and a client secret, issued together by whoever set the tunnel up. Both
+      are sent with every request, both are read by Cloudflare, and neither
+      reaches the model. They do not replace the API key above: the door and the
+      model server check different things, and a request behind Access has to
+      satisfy both. Leave both boxes empty if nobody has handed you a token.
+    </p>
+
+    <p class="warn" id="cf-half" hidden>
+      <strong>A service token needs both halves.</strong> Cloudflare finds the
+      token by its client id and then checks the secret against it, so one
+      without the other is not half a credential &mdash; it is refused at the
+      door, and what comes back is a sign-in page instead of an answer. Fill in
+      both boxes, or empty the client id to remove the token altogether.
+    </p>
+
+    <label class="small" for="cf-client-id">Access client id &mdash; ends in
+      <code>.access</code>, and is not a secret</label>
+    <input id="cf-client-id" type="text" spellcheck="false" autocomplete="off"
+           {% if not cfg.is_external %}disabled{% endif %}
+           style="width: 100%; max-width: 640px; display: block; margin: 4px 0 4px"
+           placeholder="0123456789abcdef0123456789abcdef.access"
+           value="{{ cfg.service_token.client_id.value }}">
+
+    <label class="small" for="cf-client-secret">Access client secret &mdash; the
+      long random half, which Cloudflare never shows again</label>
+    <input id="cf-client-secret" type="password" spellcheck="false" autocomplete="off"
+           {% if not cfg.is_external %}disabled{% endif %}
+           style="width: 100%; max-width: 640px; display: block; margin: 4px 0 4px"
+           placeholder="leave empty to keep the stored secret">
+    <p class="small" id="cf-secret-live">Stored secret: {{ cfg.service_token.secret.masked or 'none' }} &mdash;
+      <span class="tag">{{ cfg.service_token.secret.source }}</span></p>
+    <p class="small">
+      Emptying the client id above removes the whole token, secret included.
+      There is no way to remove the secret on its own, because a secret whose id
+      is gone cannot get through the door and cannot be shown on this page.
+      A token can only be saved against an <code>https://</code> address.
+    </p>
+  </div>
+
   <p class="small">
-    A key saved here is written in clear text to the local SQLite settings table
-    ({{ db_path }}), the same file that holds the objective and the extracted
-    facts. It is never shown in full on this page or written to the logs.
+    A key or a service-token secret saved here is written in clear text to the
+    local SQLite settings table ({{ db_path }}), the same file that holds the
+    objective and the extracted facts. Neither is ever shown in full on this
+    page or written to the logs.
   </p>
 </div>
 
@@ -150,8 +218,11 @@
   saved dialect, and the result names both the address and the dialect that
   answered, so a green line cannot be read as a test of the other one. It
   tests what is saved and not what is typed, so save before testing a change.
-  Clearing removes the endpoint, model name, key and Ollama tick from the
-  settings table and returns to the prepackaged local model.
+  The result also says whether a Cloudflare Access service token was sent,
+  because an endpoint that answers without one is no evidence that the token
+  works. Clearing removes the endpoint, model name, key, Cloudflare Access
+  service token and Ollama tick from the settings table and returns to the
+  prepackaged local model.
 </p>
 
 <div id="test-out"></div>
@@ -250,6 +321,9 @@ const urlBox = document.getElementById('url');
 const modelBox = document.getElementById('model');
 const keyBox = document.getElementById('key');
 const ollamaBox = document.getElementById('ollama');
+const cfIdBox = document.getElementById('cf-client-id');
+const cfSecretBox = document.getElementById('cf-client-secret');
+const cfHalfEl = document.getElementById('cf-half');
 const statusEl = document.getElementById('status');
 const testOut = document.getElementById('test-out');
 const externalRadio = document.getElementById('mode-external');
@@ -267,6 +341,12 @@ const savedMode = '{{ cfg.mode }}';
 // than the one in force, because that is what the tickbox above renders and
 // the two differ under the local model.
 const savedFlavor = '{{ cfg.stored_api_flavor }}';
+// Whether a client secret is already stored. The box is blank on every load
+// whether or not one is, so this is the only way the page can tell a token
+// whose secret is being kept from a token that has no secret at all - which is
+// the difference between "nothing to do" and "this will be refused". A boolean
+// and nothing more: a template may carry a mask and a flag, never a secret.
+const cfSecretStored = {{ 'true' if cfg.service_token.secret.is_set else 'false' }};
 
 function chosenMode() {
   return externalRadio.checked ? 'external' : 'local';
@@ -281,7 +361,7 @@ function chosenFlavor() {
 // Disabling never clears them, so flipping between the two costs nothing.
 function applyMode() {
   const external = chosenMode() === 'external';
-  for (const box of [urlBox, modelBox, keyBox, ollamaBox]) box.disabled = !external;
+  for (const box of [urlBox, modelBox, keyBox, ollamaBox, cfIdBox, cfSecretBox]) box.disabled = !external;
   externalBlock.style.opacity = external ? '' : '.55';
   warningEl.hidden = !external;
   ignoredEl.hidden = external;
@@ -292,12 +372,36 @@ function applyMode() {
   const flavorChanged = external && chosenFlavor() !== savedFlavor;
   statusEl.textContent = (chosenMode() === savedMode && !flavorChanged)
     ? '' : 'not saved yet — press Save';
+  checkCfPair();
+}
+
+// One header of a pair is not a weaker version of both. Cloudflare looks the
+// token up by its client id and checks the secret against it, so a lone header
+// is refused at the door - and refused with a sign-in page, which the caller
+// further down reports as an unreadable reply rather than as "you were not let
+// in". Saying so while both boxes are still on screen is the difference between
+// a mistake caught in five seconds and a mistake found an hour later in a failed
+// extraction run.
+//
+// Three states, because the secret box is blank when a secret IS stored: what
+// counts as having one is the box or the stored flag, never the box alone. An
+// empty id with an empty box is not half a token either - it is the removal of
+// one, which the operator is allowed to do.
+function checkCfPair() {
+  const external = chosenMode() === 'external';
+  const id = cfIdBox.value.trim();
+  const haveSecret = cfSecretBox.value !== '' || cfSecretStored;
+  cfHalfEl.hidden = !external
+    || (id !== '' && haveSecret)
+    || (id === '' && cfSecretBox.value === '');
 }
 
 for (const id of ['mode-local', 'mode-external']) {
   document.getElementById(id).addEventListener('change', applyMode);
 }
 ollamaBox.addEventListener('change', applyMode);
+cfIdBox.addEventListener('input', checkCfPair);
+cfSecretBox.addEventListener('input', checkCfPair);
 
 function result(text, kind) {
   testOut.innerHTML = '';
@@ -351,6 +455,15 @@ document.getElementById('save').addEventListener('click', () => {
     // otherwise every save of an unrelated field would wipe the key, because
     // the box is never repopulated with the secret.
     if (keyBox.value) payload.api_key = keyBox.value;
+    // The client id is rendered back into its box, so both of its states are
+    // meaningful and it is posted on every save of this choice, exactly as the
+    // address is. Emptying it is how a token is removed, and it takes the
+    // secret with it - a secret whose id is gone is not a credential, it is the
+    // half a request gets turned away for.
+    payload.cf_client_id = cfIdBox.value.trim();
+    // The secret follows the API key's rule and for the same reason: the box is
+    // never repopulated, so an empty one means "keep what is stored".
+    if (cfSecretBox.value) payload.cf_client_secret = cfSecretBox.value;
   }
   save(payload, mode === 'external'
        ? (chosenFlavor() === 'ollama'
@@ -360,13 +473,14 @@ document.getElementById('save').addEventListener('click', () => {
 });
 
 document.getElementById('clear').addEventListener('click', () => {
-  if (!confirm('Clear the endpoint, model name, API key and Ollama tick ' +
-               'from settings?\n\n' +
+  if (!confirm('Clear the endpoint, model name, API key, Cloudflare Access ' +
+               'service token and Ollama tick from settings?\n\n' +
                'The text model returns to the prepackaged local model.')) return;
-  // The dialect is cleared with the address it described. Leaving it ticked
-  // would hand the next endpoint typed here a native-API setting chosen for a
-  // server that is gone.
-  save({ mode: 'local', url: '', model: '', api_key: '', api_flavor: 'openai' },
+  // The dialect is cleared with the address it described, and the service token
+  // with the door it opened. Leaving either behind would hand the next endpoint
+  // typed here a setting chosen for a server that is gone.
+  save({ mode: 'local', url: '', model: '', api_key: '', api_flavor: 'openai',
+         cf_client_id: '', cf_client_secret: '' },
        'cleared — the prepackaged local model is in force');
 });
 
@@ -383,14 +497,19 @@ document.getElementById('test').addEventListener('click', async () => {
     // operator had in mind.
     const dialect = data.api_flavor === 'ollama'
       ? "Ollama's native API" : 'the OpenAI-compatible API';
+    // And whether it got there through a door. A reachable endpoint tested
+    // without the token is not evidence that the token works, and an operator
+    // who has just pasted one will read any green line as proof that it does.
+    const through = data.service_token
+      ? ', through a Cloudflare Access service token' : '';
     if (data.ok) {
       const models = (data.models || []);
       const offered = models.length
         ? `offers ${models.length} model(s): ${models.join(', ')}`
         : 'offered no model list';
-      result(`${data.url} reachable over ${dialect} — ${offered}`, 'ok');
+      result(`${data.url} reachable over ${dialect}${through} — ${offered}`, 'ok');
     } else {
-      result(`${data.message || `${data.url} failed`} — tested over ${dialect}`,
+      result(`${data.message || `${data.url} failed`} — tested over ${dialect}${through}`,
              'bad');
     }
   } catch (err) {

@@ -610,13 +610,16 @@ def report_markdown(report_id: str):
 #
 # The whole page is a thin shell over pipeline.llm_settings, which owns where
 # the text model actually points and is the only place that reads the stored
-# key. This module deliberately never handles the secret except to hand a
-# newly typed one straight to the writer: effective_config() returns the key
-# already masked, so there is no full key here to leak into a log line, a
-# template or an error message. Each field it returns carries the source it
-# came from as well as its value, because an operator who cannot tell a saved
-# override from an environment default cannot tell whether their change took
-# effect.
+# key - and the stored Cloudflare Access service token, which is a second
+# credential of the same kind, answering a different door. This module
+# deliberately never handles either secret except to hand a newly typed one
+# straight to the writer: effective_config() returns both already masked, so
+# there is no full one here to leak into a log line, a template or an error
+# message. The token's client id is the exception and is handed over whole,
+# because it is an identifier rather than a secret and the page has to render it
+# into a box. Each field carries the source it came from as well as its value,
+# because an operator who cannot tell a saved override from an environment
+# default cannot tell whether their change took effect.
 #
 # The mode is the choice that matters most on the page - the prepackaged local
 # model, or the operator's own endpoint - so it travels with every save. It has
@@ -629,8 +632,9 @@ def report_markdown(report_id: str):
 # did not, and transcription failed naming a variable nobody had set. One
 # endpoint, one model, and whether it can read an image is asked of the
 # endpoint rather than configured here. What the old arrangement got right is
-# kept: the
-# two had silently been one decision made in two places.
+# kept: the warning on the settings page still says out loud that page images go
+# wherever the text model goes, because the two had silently been one decision
+# made in two places.
 
 
 @app.get("/settings", response_class=HTMLResponse)
@@ -663,14 +667,27 @@ def api_settings(payload: dict):
     posts it only when that endpoint is the choice being saved, and an omitted
     value leaves the stored dialect exactly as it stands.
 
+    The Cloudflare Access service token is two fields and one credential.
+    cf_client_id is a visible box and follows the url/model rule - it is posted
+    on every save of the external endpoint, and an empty one removes the token.
+    cf_client_secret follows api_key's rule, because it is a secret the page
+    cannot render: it is posted only when the operator typed one, and an omitted
+    value leaves the stored secret alone. There is no way to clear the secret on
+    its own, deliberately - a secret whose client id has been removed
+    authenticates nothing and cannot be shown on this page, so the id takes it
+    along when it goes.
     """
     url = payload.get("url")
     model = payload.get("model")
     api_key = payload.get("api_key")
     mode = payload.get("mode")
     api_flavor = payload.get("api_flavor")
+    cf_client_id = payload.get("cf_client_id")
+    cf_client_secret = payload.get("cf_client_secret")
     for name, value in (("url", url), ("model", model), ("api_key", api_key),
-                        ("mode", mode), ("api_flavor", api_flavor),):
+                        ("mode", mode), ("api_flavor", api_flavor),
+                        ("cf_client_id", cf_client_id),
+                        ("cf_client_secret", cf_client_secret),):
         if value is not None and not isinstance(value, str):
             raise HTTPException(status_code=400, detail=f"{name} must be text")
     # The mode is checked before anything is written. set_mode() would refuse
@@ -691,8 +708,14 @@ def api_settings(payload: dict):
     try:
         # The endpoint values are stored first and the mode is switched after,
         # so external mode is never in force for the moment before the address
-        # it points at has been written.
-        llm_settings.save_config(url=url, model=model, api_key=api_key)
+        # it points at has been written. That ordering matters more for the
+        # service token than for anything before it: a mode switched on ahead of
+        # its credential is a window in which every call reaches an
+        # Access-protected endpoint with no token, and the answer to those calls
+        # is a sign-in page rather than an error anything downstream can read.
+        llm_settings.save_config(url=url, model=model, api_key=api_key,
+                                 cf_client_id=cf_client_id,
+                                 cf_client_secret=cf_client_secret)
         # The dialect is written before the mode is switched, for the same
         # reason the address is: external mode must never be in force for the
         # moment before the way to speak to that address has been stored.
@@ -705,8 +728,14 @@ def api_settings(payload: dict):
         # error to fix and the message names the field, so it belongs on the
         # page rather than in a 500 that reads as a fault in the application.
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    log.info("model settings updated: mode=%s dialect=%s",
-             llm_settings.mode(), llm_settings.api_flavor())
+    # Read back after the writes, like the other two, so the line reports what
+    # is in force rather than what was posted - and a boolean, never a value.
+    # The page promises the operator that a secret saved there is never written
+    # to the logs, and "set"/"unset" keeps that promise while still answering
+    # the only question a log reader has.
+    log.info("model settings updated: mode=%s dialect=%s cf_access=%s",
+             llm_settings.mode(), llm_settings.api_flavor(),
+             "set" if llm_settings.service_token_is_set() else "unset")
     return JSONResponse({"saved": True,
                          "config": llm_settings.config_as_dict()})
 
@@ -724,6 +753,19 @@ def api_settings_test():
     A failure is returned as a failure with its own message: reporting it as
     anything softer would leave an operator believing a remote model is in use
     when it is not.
+
+    The same is true of the Cloudflare Access service token, and it matters more
+    there than it does for the key: an endpoint behind Access refuses an
+    untokened request with a sign-in page rather than an error, so the result
+    says whether a token was actually sent. A green line that did not say so
+    would be read as proof of the token by the operator who had just pasted one,
+    when it may be proof of an endpoint that is not behind anything at all.
+
+    The cost of testing what is saved rather than what is typed is higher for a
+    token than for a key, because a wrong token produces a login page rather
+    than a clean error, and save-then-discover is the only feedback available.
+    If that proves painful the change is to post the unsaved pair here and
+    rewrite this paragraph honestly - not to weaken it quietly.
     """
     outcome = llm_settings.check_connectivity()
     # The outcome names the dialect it was measured over. A green line saying
@@ -736,6 +778,8 @@ def api_settings_test():
     # for the saved tickbox to do it.
     outcome.setdefault("api_flavor", llm_settings.stored_api_flavor())
     return JSONResponse(outcome)
+
+
 @app.get("/healthz", response_class=PlainTextResponse)
 def healthz():
     state.query_one("SELECT 1 AS n")

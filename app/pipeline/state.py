@@ -232,6 +232,24 @@ def set_setting(key: str, value: str) -> None:
             (key, value, utcnow()))
 
 
+def set_settings(values: dict[str, str]) -> None:
+    """Write several settings as one commit.
+
+    Two values that are halves of one credential must never be readable apart.
+    A Cloudflare Access service token stored as a client id with no secret is
+    the exact state in which every request is turned away at the door, and a
+    reader landing between two separate set_setting() calls would see it -
+    another request thread, or a document already part-way through a run.
+    """
+    with tx() as conn:
+        for key, value in values.items():
+            conn.execute(
+                "INSERT INTO settings (key, value, updated_at) VALUES (?,?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, "
+                "updated_at=excluded.updated_at",
+                (key, value, utcnow()))
+
+
 def set_status(doc_id: str, status: str, *, stage: str | None = None,
                progress: str | None = None, error: str | None = None) -> None:
     with tx() as conn:

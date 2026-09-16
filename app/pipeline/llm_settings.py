@@ -19,11 +19,18 @@ on this machine, and nothing here is reachable from the embedding path: the
 resolver is consulted only by a ModelRunner that was built with no endpoint of
 its own, and embed.py always passes one and passes allow_override=False besides.
 
-The second is that the API key is a secret held in the local SQLite settings
-table. It leaves this module by one route only - client_override(), which the
-model client uses to build an Authorization header. The configuration object
-handed to the web layer carries a mask and a boolean instead of the key, so a
-template cannot render the secret even by accident.
+The second is that the credentials are secrets held in the local SQLite
+settings table: the API key the endpoint itself checks, and - when the endpoint
+sits behind a Cloudflare tunnel - the two halves of an Access service token,
+which Cloudflare consumes at its own door and the endpoint never sees. They
+leave this module by one route only - client_override(), which the model client
+uses to build the Authorization and CF-Access-* headers. The configuration
+object handed to the web layer carries a mask and a boolean instead of each
+secret, so a template cannot render one even by accident. The token's client id
+is the deliberate exception and is handed over whole: it is an identifier
+rather than a secret, it authenticates nothing without the secret it names, and
+an operator who cannot see which token is installed cannot tell a wrong one
+from a revoked one.
 
 The third is that an unset override must mean exactly the behaviour that came
 before it: the environment first, then the built-in local default. A
@@ -66,6 +73,12 @@ SETTING_API_FLAVOR = "llm_api_flavor"
 # place. The scope names where it runs; the model names which one to ask.
 SETTING_VISION_MODEL = "llm_vision_model"
 SETTING_VISION_SCOPE = "llm_vision_scope"
+# A Cloudflare Access service token is two values and one credential. Both keys
+# are written together or not at all - see save() - because a stored id with no
+# secret is not half a credential: it is the state in which every request is
+# refused at the door with a sign-in page rather than an answer.
+SETTING_CF_CLIENT_ID = "llm_cf_client_id"
+SETTING_CF_CLIENT_SECRET = "llm_cf_client_secret"
 
 # The two modes, named once for the same reason as the keys. Local is the
 # behaviour that existed before the settings page, and it is what an unset or
@@ -104,6 +117,11 @@ FLAVORS = (FLAVOR_OPENAI, FLAVOR_OLLAMA)
 MAX_URL = 500
 MAX_MODEL = 200
 MAX_KEY = 500
+# The client id is a short published identifier, so its limit is doing more
+# than guarding against a paste: a long value in that box is nearly always the
+# secret typed into the wrong one, and the message says so.
+MAX_CF_CLIENT_ID = 100
+MAX_CF_CLIENT_SECRET = 500
 
 # The connectivity check runs while an operator watches a button, so it uses a
 # short timeout and does not retry - a slow failure here is a failure.
@@ -130,6 +148,39 @@ class Resolved:
     @property
     def from_settings(self) -> bool:
         return self.source == "settings"
+
+
+@dataclass(frozen=True, repr=False)
+class ClientOverride:
+    """Everything a bare ModelRunner needs to reach the operator's endpoint.
+
+    A record rather than a widening tuple because it now carries two different
+    credentials answering two different doors, and a caller that unpacked four
+    positional strings would be one careless edit away from putting the wrong
+    one in the wrong header - a swap that produces a refusal indistinguishable
+    from a wrong token. Every field is empty in local mode, which is how the
+    client falls back to the chain it used before this page existed.
+    """
+
+    url: str = ""
+    api_key: str = ""
+    cf_client_id: str = ""
+    cf_client_secret: str = ""
+
+    def __repr__(self) -> str:
+        """Written by hand because the generated one would print both secrets.
+
+        A frozen dataclass prints every field it has, and this object is passed
+        as an argument, so the default repr would put the API key and the client
+        secret into any traceback that renders a frame's locals - the one place
+        this module promises they never go. The client id is printed whole for
+        the reason it is shown on the page: it is an identifier, and knowing
+        which token is installed is the point of being able to see it.
+        """
+        return (f"ClientOverride(url={self.url!r}, "
+                f"api_key={mask_key(self.api_key)!r}, "
+                f"cf_client_id={self.cf_client_id!r}, "
+                f"cf_client_secret={mask_key(self.cf_client_secret)!r})")
 
 
 @dataclass(frozen=True)
@@ -170,10 +221,16 @@ class CheckResult:
     url: str = ""
     models: list[str] = field(default_factory=list)
     model_found: bool | None = None     # None when no model name was checked
+    # Whether the test actually presented a service token. The page says so on
+    # the green line as well as the red one: an endpoint that answers without a
+    # token is no evidence at all that the token works, and an operator who has
+    # just pasted one will read any green line as proof that it did.
+    service_token: bool = False
 
     def as_dict(self) -> dict:
         return {"ok": self.ok, "message": self.message, "url": self.url,
-                "models": self.models, "model_found": self.model_found}
+                "models": self.models, "model_found": self.model_found,
+                "service_token": self.service_token}
 
 
 # --------------------------------------------------------------------------
@@ -358,6 +415,32 @@ def _api_key() -> str:
     return _setting(SETTING_API_KEY)
 
 
+def stored_cf_client_id() -> str:
+    """The saved Cloudflare Access client id, in force or not.
+
+    Public where the secret's reader is private, and by decision rather than by
+    oversight: the id is an identifier, it authenticates nothing on its own, it
+    travels in clear text in every request header anyway, and the settings page
+    has to render it into a box the operator can read back and correct.
+    """
+    return _setting(SETTING_CF_CLIENT_ID)
+
+
+def _cf_client_secret() -> str:
+    """The stored client secret. Module-private on purpose: see client_override()."""
+    return _setting(SETTING_CF_CLIENT_SECRET)
+
+
+def service_token_is_set() -> bool:
+    """Whether a whole service token is stored: a boolean, never a value.
+
+    This is what the log line and the web layer are allowed to know. Both halves
+    or neither, because one half is not a weaker credential - it is the state
+    every reader of this pair refuses.
+    """
+    return bool(stored_cf_client_id() and _cf_client_secret())
+
+
 def text_model_config() -> TextModelConfig:
     """Everything the settings page needs, and nothing it must not have."""
     key = _api_key()
@@ -365,30 +448,48 @@ def text_model_config() -> TextModelConfig:
                            api_key_hint=mask_key(key), api_key_set=bool(key))
 
 
-def client_override() -> tuple[str, str]:
-    """The endpoint and key for a ModelRunner built with no url of its own.
+def client_override() -> ClientOverride:
+    """The endpoint and credentials for a ModelRunner built with no url.
 
-    Local mode returns ("", ""), which is how the client falls back to the
-    environment and then to the built-in runner, unix socket included. The
-    stored endpoint and key are not read at all in that mode.
+    Local mode returns an empty record, which is how the client falls back to
+    the environment and then to the built-in runner, unix socket included. The
+    stored endpoint, key and service token are not read at all in that mode.
 
     External mode with no stored endpoint raises instead of returning empty.
     An empty return would send the request to the local runner, and an
     operator who believes a 31B model is answering while a 12B one actually is
     has nothing in the output to tell them apart.
 
-    This is the only function that hands the key out, and its one caller is
+    A half-configured service token raises for the same reason, against the
+    same kind of mistake seen later. One header of a pair is not a weaker
+    attempt at authentication: Cloudflare finds the token by its id and then
+    checks the secret against it, so a lone header is answered with a sign-in
+    page, which arrives here as an unreadable reply five frames from anything
+    that could name the cause.
+
+    This is the only function that hands a secret out, and its one caller is
     ModelRunner.__init__.
     """
     if not is_external():
-        return "", ""
+        return ClientOverride()
     url = _setting(SETTING_BASE_URL)
     if not url:
         raise ModelRunnerError(
             "the text model is set to an external endpoint, but no endpoint "
             "address is saved - enter one on the settings page, or switch the "
             "text model back to the local one")
-    return url, _api_key()
+    cf_id, cf_secret = stored_cf_client_id(), _cf_client_secret()
+    if bool(cf_id) != bool(cf_secret):
+        raise ModelRunnerError(
+            "the Cloudflare Access service token is half configured - "
+            + ("a client id is saved with no client secret"
+               if cf_id else "a client secret is saved with no client id")
+            + ". Cloudflare finds the token by its id and then checks the "
+            "secret against it, so one header alone is refused at the door "
+            "with a sign-in page rather than an answer - fill both in on the "
+            "settings page, or empty the client id to remove the token")
+    return ClientOverride(url=url, api_key=_api_key(),
+                          cf_client_id=cf_id, cf_client_secret=cf_secret)
 
 
 def effective_text_model() -> str:
@@ -488,14 +589,95 @@ def _validate_key(key: str) -> str:
     return key
 
 
+# The client id's published shape. Only the suffix is asserted, and that is a
+# considered line rather than a lazy one. The mistake this actually catches is
+# the two boxes filled in the wrong order, which is common, costs an afternoon
+# and is invisible from the far end - Cloudflare answers a wrong id with the
+# same sign-in page it answers a missing one with. Asserting the rest of the
+# shape as well - 32 hexadecimal characters - would catch almost nothing more
+# and would brick a working token the day Cloudflare issues a different one,
+# with no remedy on the page and none in .env either.
+CF_CLIENT_ID_SUFFIX = ".access"
+
+
+def _validate_cf_client_id(client_id: str) -> str:
+    client_id = _clean(client_id)
+    if not client_id:
+        return ""
+    if len(client_id) > MAX_CF_CLIENT_ID:
+        raise SettingsError(
+            f"the Cloudflare Access client id is longer than "
+            f"{MAX_CF_CLIENT_ID} characters - it is a short identifier, so a "
+            f"long value here is usually the client secret pasted into the "
+            f"wrong box")
+    # It becomes an HTTP header value under exactly the conditions the API key
+    # does: a newline out of a paste is header injection, and a non-ASCII
+    # character raises inside the HTTP library at request time.
+    if any(ch.isspace() or ord(ch) < 32 or ord(ch) > 126 for ch in client_id):
+        raise SettingsError(
+            "the Cloudflare Access client id contains a space, a line break "
+            "or a non-ASCII character - check for a stray newline in the paste")
+    if not client_id.endswith(CF_CLIENT_ID_SUFFIX):
+        raise SettingsError(
+            f"the Cloudflare Access client id ends in "
+            f"'{CF_CLIENT_ID_SUFFIX}', and this one does not - if what you "
+            f"have is the long random value, that is the client secret and "
+            f"belongs in the box below it")
+    # Stored exactly as typed, case included. Normalising would be one call and
+    # is left out on purpose: sending a credential in a form its issuer did not
+    # give it in is the worse of the two guesses available here.
+    return client_id
+
+
+def _validate_cf_client_secret(secret: str) -> str:
+    secret = _clean(secret)
+    if not secret:
+        return ""
+    if len(secret) > MAX_CF_CLIENT_SECRET:
+        raise SettingsError(
+            f"the Cloudflare Access client secret is longer than "
+            f"{MAX_CF_CLIENT_SECRET} characters")
+    if any(ch.isspace() or ord(ch) < 32 or ord(ch) > 126 for ch in secret):
+        raise SettingsError(
+            "the Cloudflare Access client secret contains a space, a line "
+            "break or a non-ASCII character - check for a stray newline in "
+            "the paste")
+    # The swap is caught from both sides or it is not caught at all. An id in
+    # the secret box passes every test above, and the pair that results is
+    # refused at the edge by a server that cannot say which box was wrong.
+    if secret.endswith(CF_CLIENT_ID_SUFFIX):
+        raise SettingsError(
+            f"that value ends in '{CF_CLIENT_ID_SUFFIX}', which makes it a "
+            f"Cloudflare Access client id rather than a client secret - the "
+            f"two boxes look to be filled in the wrong order")
+    return secret
+
+
 def save(base_url_value: str, model_value: str, *,
-         api_key_value: str | None = None, clear_api_key: bool = False) -> None:
+         api_key_value: str | None = None, clear_api_key: bool = False,
+         cf_client_id_value: str | None = None,
+         cf_client_secret_value: str | None = None) -> None:
     """Validate and store the override. An empty value clears that setting.
 
     The key follows the usual rule for a secret in a form: a blank field means
     "leave what is stored alone", because the field is rendered blank on every
     load. Removing a key is therefore a deliberate act - clear_api_key - and
     not something a re-save can do by accident.
+
+    The Cloudflare Access service token is two values and one credential, so it
+    is validated and written as one. Its client id is rendered back into its box
+    exactly as the address is, so an empty id is the operator asking for the
+    token to go - and it takes the secret with it, because a stored secret whose
+    id has been removed authenticates nothing, cannot be shown on the page, and
+    could only ever be found again by whoever next opened the database. The
+    secret keeps the key's rule for the case that matters: a blank box while the
+    id stays put means "keep what is stored", so saving an unrelated field never
+    wipes it.
+
+    A save that mentions neither half leaves both untouched and runs no check at
+    all. That is the local-mode save the page sends - a mode and nothing else -
+    and it has to stay cheap: an operator whose remedy is to go back to the
+    local model must not be blocked by the token they are walking away from.
     """
     errors: list[str] = []
     url = model = ""
@@ -513,6 +695,69 @@ def save(base_url_value: str, model_value: str, *,
             key = _validate_key(api_key_value)
         except SettingsError as exc:
             errors.append(str(exc))
+
+    token_touched = (cf_client_id_value is not None
+                     or cf_client_secret_value is not None)
+    cf_id = cf_secret = ""
+    if token_touched:
+        if cf_client_id_value is None:
+            # Inherited rather than typed, so it is taken as it stands. Running
+            # the validator over it again would mean that the day Cloudflare
+            # issues a differently shaped id, every later save of any field on
+            # this page is refused for a value the operator did not touch and
+            # cannot correct.
+            cf_id = stored_cf_client_id()
+        else:
+            try:
+                cf_id = _validate_cf_client_id(cf_client_id_value)
+            except SettingsError as exc:
+                errors.append(str(exc))
+        new_secret: str | None = None
+        if cf_client_secret_value is not None and _clean(cf_client_secret_value):
+            try:
+                new_secret = _validate_cf_client_secret(cf_client_secret_value)
+            except SettingsError as exc:
+                errors.append(str(exc))
+        # What the pair would be once this save has landed is what has to be a
+        # pair - never what the form sent, because the secret box is blank on
+        # every load and says nothing at all about whether a secret is stored.
+        if not cf_id:
+            # An empty id is the operator removing the token, and the stored
+            # secret goes with it. A secret TYPED in the same breath is not a
+            # removal though - it is half a credential, just made - and
+            # discarding it quietly is the one thing this page must not do,
+            # because the warning beside those boxes has already told the
+            # operator it is half a credential. Silence here would be the page
+            # and the writer disagreeing about the same two boxes.
+            if new_secret:
+                errors.append(
+                    "the Cloudflare Access client secret has no client id with "
+                    "it - the id is how Cloudflare finds the token, so a secret "
+                    "on its own identifies nothing. Paste the client id that "
+                    "came with this secret (it ends in .access), or empty the "
+                    "secret box too if you meant to remove the token")
+            cf_secret = ""
+        else:
+            cf_secret = (new_secret if new_secret is not None
+                         else _cf_client_secret())
+            if not cf_secret:
+                errors.append(
+                    "the Cloudflare Access client id has no client secret with "
+                    "it - Cloudflare finds the token by its id and then checks "
+                    "the secret against it, so one without the other is refused "
+                    "at the door with a sign-in page instead of an answer. "
+                    "Paste the client secret that came with this id, or empty "
+                    "the client id box to remove the token")
+        # Access is reached over TLS and only over TLS. A token saved against a
+        # plain-http address is a secret configured to cross the network in
+        # clear text on every single call, which is worth refusing at the field
+        # rather than discovering never.
+        if cf_id and url and urlsplit(url).scheme == "http":
+            errors.append(
+                "a Cloudflare Access service token cannot be saved against an "
+                "http:// address - the client secret would cross the network "
+                "in clear text on every call. Use the https:// address of the "
+                "tunnel, or remove the token")
     if errors:
         raise SettingsError("\n".join(errors))
 
@@ -525,6 +770,13 @@ def save(base_url_value: str, model_value: str, *,
         state.set_setting(SETTING_API_KEY, "")
     elif key is not None:
         state.set_setting(SETTING_API_KEY, key)
+    # The two halves go down in one transaction. Two writes would leave a window
+    # in which a concurrent reader - another request, a run already under way -
+    # saw an id with no secret, which is precisely the state every reader of
+    # this pair is written to refuse.
+    if token_touched:
+        state.set_settings({SETTING_CF_CLIENT_ID: cf_id,
+                            SETTING_CF_CLIENT_SECRET: cf_secret})
 
 
 # --------------------------------------------------------------------------
@@ -532,7 +784,9 @@ def save(base_url_value: str, model_value: str, *,
 # --------------------------------------------------------------------------
 def check_connection(base_url_value: str = "", model_value: str = "",
                      api_key_value: str | None = None,
-                     flavor_value: str | None = None) -> CheckResult:
+                     flavor_value: str | None = None,
+                     cf_client_id_value: str | None = None,
+                     cf_client_secret_value: str | None = None) -> CheckResult:
     """Ask an endpoint for its model list and report what happened.
 
     Called with no arguments this tests the saved override. Called with the
@@ -553,6 +807,13 @@ def check_connection(base_url_value: str = "", model_value: str = "",
     their models at different addresses - /v1/models against an OpenAI-style
     server, /api/tags against Ollama's native API - so a test run in the wrong
     dialect answers 404 against a server that is working perfectly.
+
+    The service token's two halves follow the key's sentinel rule too, and they
+    have to be handed to the client explicitly because this check builds its
+    runner with allow_override=False - it measures the endpoint it names, which
+    is the whole point of it - so nothing reaches that client that is not passed
+    in here. A test that quietly ran without the token would report "reachable"
+    against an endpoint every real call is turned away from.
     """
     url = (_clean(base_url_value) or stored_base_url()
            or _local_base_url().value)
@@ -564,6 +825,18 @@ def check_connection(base_url_value: str = "", model_value: str = "",
     want = (_clean(model_value) or stored_text_model()
             or _clean(env_str("TEXT_MODEL", "")))
     key = _api_key() if api_key_value is None else _clean(api_key_value)
+    # Validated rather than merely cleaned, unlike the key above. These two
+    # become header values on a client this function builds itself, and a value
+    # that reaches requests with a newline or a non-ASCII character in it raises
+    # inside the HTTP library and is reported as "the test failed" - a fault in
+    # the endpoint, for a fault in the box.
+    try:
+        cf_id = (stored_cf_client_id() if cf_client_id_value is None
+                 else _validate_cf_client_id(cf_client_id_value))
+        cf_secret = (_cf_client_secret() if cf_client_secret_value is None
+                     else _validate_cf_client_secret(cf_client_secret_value))
+    except SettingsError as exc:
+        return CheckResult(False, str(exc), url)
     flavor = (stored_api_flavor() if flavor_value is None
               else _clean(flavor_value).lower())
     # The url above can fall back to the built-in runner when no endpoint is
@@ -573,37 +846,67 @@ def check_connection(base_url_value: str = "", model_value: str = "",
     # looking for a fault that is not there.
     if url.rstrip("/") == _local_base_url().value.rstrip("/"):
         flavor = FLAVOR_OPENAI
+        # The built-in runner is behind nobody's tunnel, and a token presented
+        # to it is a secret handed to a process with no use for it. The dialect
+        # above is clamped for the same reason: what is being tested here is
+        # the local runner, so it is tested as the local runner - and a client
+        # carrying Access headers is kept off the unix socket, so presenting a
+        # token here would move this very check onto TCP and stop it measuring
+        # the path the local model actually uses.
+        cf_id = cf_secret = ""
+    # A half pair is refused here rather than sent, because sending one header
+    # measures nothing: Cloudflare answers it with a sign-in page, and the red
+    # line the operator then reads would blame the endpoint for what is wrong in
+    # the box above it. ModelRunner refuses the same state by raising; this
+    # function's contract is to return a result, so it returns one. It must also
+    # come before the runner is built, because the except arms below name
+    # runner.url and a raise from the constructor would reach them as a
+    # NameError rather than as a message.
+    if bool(cf_id) != bool(cf_secret):
+        return CheckResult(
+            False,
+            "the Cloudflare Access service token is half configured - "
+            + ("a client id is saved with no client secret"
+               if cf_id else "a client secret is saved with no client id")
+            + ", and one header of the pair is refused at the door rather than "
+            "passed through - fill both in and save before testing", url)
+    sent = bool(cf_id and cf_secret)
 
     # allow_override=False and an explicit url: the test must measure the
     # endpoint being tested, never quietly fall back to whatever is saved.
     runner = ModelRunner(url=url, api_key=key, allow_override=False,
-                         timeout=CHECK_TIMEOUT, retries=1, flavor=flavor)
+                         timeout=CHECK_TIMEOUT, retries=1, flavor=flavor,
+                         cf_client_id=cf_id, cf_client_secret=cf_secret)
     try:
         models = runner.list_models()
     except ModelRunnerError as exc:
-        # The client scrubs the key from its own error text; the first line is
-        # what the callers of this pipeline show, so it is what is shown here.
-        return CheckResult(False, str(exc).splitlines()[0], runner.url)
+        # The client never puts a credential into its own error text - it is not
+        # scrubbed out, it is never put in, an invariant held by hand at the
+        # three lines of _headers() and nowhere else. Only the first line is
+        # shown, because that is what every caller of this pipeline shows.
+        return CheckResult(False, str(exc).splitlines()[0], runner.url,
+                           service_token=sent)
     except Exception as exc:                     # unexpected, still not fatal
-        return CheckResult(False, f"the test failed: {exc}", runner.url)
+        return CheckResult(False, f"the test failed: {exc}", runner.url,
+                           service_token=sent)
 
     if not models:
         return CheckResult(
             True, f"reached {runner.url}, but it lists no models", runner.url,
-            models, None if not want else False)
+            models, None if not want else False, service_token=sent)
     if not want:
         return CheckResult(
             True, f"reached {runner.url}: {len(models)} model(s) available",
-            runner.url, models, None)
+            runner.url, models, None, service_token=sent)
     found = any(same_model(want, have) for have in models)
     if found:
         return CheckResult(True, f"reached {runner.url} and it serves {want}",
-                           runner.url, models, True)
+                           runner.url, models, True, service_token=sent)
     return CheckResult(
         False,
         f"reached {runner.url}, but it does not serve {want} - it offers "
         f"{', '.join(models[:8])}" + (" ..." if len(models) > 8 else ""),
-        runner.url, models, False)
+        runner.url, models, False, service_token=sent)
 
 
 # --------------------------------------------------------------------------
@@ -739,27 +1042,15 @@ def vision_can_be_verified() -> bool:
     return vision_api_flavor() == FLAVOR_OLLAMA
 
 
-def vision_client_override() -> tuple[str, str, str]:
-    """The endpoint, key and dialect for the client transcription builds.
-
-    Local scope returns ("", "", "openai"), which is exactly the chain
-    transcription has always followed - the environment, then the built-in
-    runner, unix socket included. Nothing stored is consulted in that scope.
-
-    External scope raises rather than returning empty when no endpoint is
-    saved. An empty return would send page images to the local runner while the
-    page said they were going elsewhere, and this is the stage where a quiet
-    substitution does the most damage.
-    """
-    if not is_vision_external():
-        return "", "", FLAVOR_OPENAI
-    url = _setting(SETTING_BASE_URL)
-    if not url:
-        raise ModelRunnerError(
-            "transcription is set to run on the external endpoint, but no "
-            "endpoint address is saved - enter one on the settings page, or "
-            "set transcription back to the local runner")
-    return url, _api_key(), stored_api_flavor()
+# vision_client_override() stood here and has been removed. It had no caller
+# anywhere under app/ - transcription builds a bare client and resolves the
+# endpoint through client_override() like every other stage - and it was the one
+# remaining function that handed the API key out whole. Left in place it would
+# have been a second exit for a secret that now knows nothing about the service
+# token beside it: the next person to wire it up sends an Authorization header
+# with no CF-Access pair and collects a sign-in page nobody can explain. Its
+# deletion is what makes this module's one-route claim literally true, and this
+# change leans on that claim harder than anything before it.
 
 
 def vision_missing_message() -> str:
@@ -929,7 +1220,16 @@ def check_vision(model_value: str = "",
     # a remedy names the settings page rather than MODEL_URL.
     runner = ModelRunner(url=url, api_key=key, allow_override=False,
                          timeout=CHECK_TIMEOUT, retries=1, flavor=flavor,
-                         from_settings=scope == VISION_EXTERNAL)
+                         from_settings=scope == VISION_EXTERNAL,
+                         # Named explicitly for the reason the key is: this
+                         # client is built with allow_override=False, so what
+                         # is not handed to it here is not sent. Without these
+                         # a check against an endpoint behind Access reports a
+                         # red cross for a configuration that works.
+                         cf_client_id=(stored_cf_client_id()
+                                       if scope == VISION_EXTERNAL else ""),
+                         cf_client_secret=(_cf_client_secret()
+                                           if scope == VISION_EXTERNAL else ""))
     try:
         models = runner.list_models()
     except ModelRunnerError as exc:
@@ -1001,6 +1301,37 @@ class KeyView:
 
 
 @dataclass(frozen=True)
+class ServiceTokenView:
+    """A stored service token as the page is allowed to see it.
+
+    The client id is carried whole and the secret is not, which is not an
+    inconsistency but the distinction the credential itself makes: the id is an
+    identifier that travels in clear text in every request header and is worth
+    nothing without its other half, and an operator who cannot see which token
+    is installed cannot tell a wrong one from a revoked one. The secret gets the
+    treatment the API key gets, for the reason the API key gets it.
+    """
+
+    client_id: Resolved
+    secret: KeyView
+
+    @property
+    def is_set(self) -> bool:
+        """Both halves stored - the only state in which a token is ever sent."""
+        return bool(self.client_id.value) and self.secret.is_set
+
+    @property
+    def is_half(self) -> bool:
+        """One half stored, which is the state every reader of the pair refuses."""
+        return bool(self.client_id.value) != self.secret.is_set
+
+
+def _no_service_token() -> ServiceTokenView:
+    return ServiceTokenView(client_id=Resolved("", "unset"),
+                            secret=KeyView("", "unset", False))
+
+
+@dataclass(frozen=True)
 class PageConfig:
     """What is in force, plus the mode and the values a form must render.
 
@@ -1023,10 +1354,26 @@ class PageConfig:
     # object. It is a whole configuration of its own - model, scope, endpoint,
     # dialect - because vision does not have to run where the text model runs.
     vision: VisionConfig | None = None
+    # The token travels with the endpoint it belongs to, for the reason vision
+    # does: the page reads one object, and a credential fetched separately is a
+    # credential some future template can forget to mask.
+    service_token: ServiceTokenView = field(default_factory=_no_service_token)
 
     @property
     def is_external(self) -> bool:
         return self.mode == MODE_EXTERNAL
+
+    @property
+    def service_token_in_force(self) -> bool:
+        """A whole token AND a mode that uses it.
+
+        is_set is a fact about the database and says nothing about whether
+        anything is sent. The banner needs the second question answered, and
+        answering it with template nesting - a clause that happens to sit inside
+        an "is external" block - is how a page comes to claim something the wire
+        does not do the first time that block is rearranged.
+        """
+        return self.is_external and self.service_token.is_set
 
     @property
     def is_ollama_api(self) -> bool:
@@ -1041,6 +1388,7 @@ class PageConfig:
 def effective_config() -> PageConfig:
     """The effective text-model configuration, safe to render."""
     key = _api_key()
+    cf_id, cf_secret = stored_cf_client_id(), _cf_client_secret()
     return PageConfig(
         url=base_url(),
         model=text_model(),
@@ -1052,7 +1400,12 @@ def effective_config() -> PageConfig:
         stored_model=stored_text_model(),
         api_flavor=api_flavor(),
         stored_api_flavor=stored_api_flavor(),
-        vision=vision_config())
+        vision=vision_config(),
+        service_token=ServiceTokenView(
+            client_id=Resolved(cf_id, "settings" if cf_id else "unset"),
+            secret=KeyView(masked=mask_key(cf_secret),
+                           source="settings" if cf_secret else "unset",
+                           is_set=bool(cf_secret))))
 
 
 def config_as_dict() -> dict:
@@ -1072,11 +1425,26 @@ def config_as_dict() -> dict:
             # Nested rather than flattened in: every key under "vision"
             # describes the vision model, and a reader that skips the block
             # cannot mistake one of them for a text-model setting.
-            "vision": vision_config_as_dict()}
+            "vision": vision_config_as_dict(),
+            # Nested for that same reason. Every key under "service_token"
+            # describes the door in front of the endpoint rather than the
+            # endpoint itself, and a reader skipping the block cannot mistake
+            # one of them for the endpoint's own API key.
+            "service_token": {
+                "client_id": {"value": cfg.service_token.client_id.value,
+                              "source": cfg.service_token.client_id.source},
+                "secret": {"masked": cfg.service_token.secret.masked,
+                           "source": cfg.service_token.secret.source,
+                           "is_set": cfg.service_token.secret.is_set},
+                "is_set": cfg.service_token.is_set,
+                "is_half": cfg.service_token.is_half,
+                "in_force": cfg.service_token_in_force}}
 
 
 def save_config(url: str | None = None, model: str | None = None,
-                api_key: str | None = None) -> None:
+                api_key: str | None = None,
+                cf_client_id: str | None = None,
+                cf_client_secret: str | None = None) -> None:
     """Store what the form sent.
 
     A field the form omitted entirely is left as it stands. That matters most
@@ -1092,11 +1460,20 @@ def save_config(url: str | None = None, model: str | None = None,
     is the one field with no text box and no empty-means-unchanged rule. The
     API flavour is the second such field and has its own writer for the same
     reason: set_api_flavor().
+
+    The service token needs none of the translation the key needs. The key's
+    empty string has to become an explicit clear flag here because the key has
+    no box that can be seen and emptied; the token's client id does have one, so
+    an empty id means what an empty address means, and the secret is removed
+    with the id rather than on its own. Both are therefore passed straight
+    through, sentinels intact.
     """
     save(base_url_value=stored_base_url() if url is None else url,
          model_value=stored_text_model() if model is None else model,
          api_key_value=None if api_key in (None, "") else api_key,
-         clear_api_key=api_key == "")
+         clear_api_key=api_key == "",
+         cf_client_id_value=cf_client_id,
+         cf_client_secret_value=cf_client_secret)
 
 
 def check_connectivity() -> dict:

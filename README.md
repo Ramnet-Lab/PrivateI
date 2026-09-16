@@ -86,6 +86,37 @@ and put the name in `.env`. Changing `EMBED_MODEL` changes the vector width, so
 re-index afterwards from the Chat page ("Index passages") — the app skips
 vectors whose width does not match rather than mixing them.
 
+### Pointing the text model somewhere else
+
+The **Settings** page can send the text model to an endpoint of your own instead
+of the built-in runner: a base URL, the model name that endpoint uses, an API key
+if it wants one, and a tickbox for whether it is an Ollama server (on its
+OpenAI-compatible route Ollama silently ignores the context-size option, so long
+documents come back empty; ticked, calls go to its native API).
+
+If that endpoint sits behind a Cloudflare tunnel there is one more field — or
+rather two halves of one. A **Cloudflare Access service token** is a client id
+ending in `.access` and a client secret, issued together by whoever runs the
+tunnel. The token gets the request past Cloudflare's door and is never seen by
+the model server; the API key is checked by the model server and means nothing to
+Cloudflare, so an endpoint behind Access usually needs both. Half a token is
+worse than none — Cloudflare answers a lone header with a sign-in page rather
+than an error — so the page refuses to save one half without the other, and
+emptying the client id removes the whole token. A token can only be saved against
+an `https://` address. The API key and the client secret are stored in clear text
+in `data/state.db`, alongside the objective and the extracted facts, and are
+shown on the page only as a masked hint.
+
+Press **Test** after saving. It reports the address, the dialect that answered,
+and whether a service token was actually sent — an endpoint that answers without
+one is no evidence that the token works.
+
+While an external endpoint is in force, everything the text model reads —
+document passages, extracted facts, the allegations — is sent there, and so are
+the page images, because transcription asks the same model at the same endpoint.
+Embeddings always stay local: they name the built-in runner explicitly and cannot
+be pointed anywhere else from this page.
+
 ## The pages
 
 - **Documents** — drag and drop, and watch each file's progress. Open one to see
@@ -240,8 +271,21 @@ file that is perfectly intact. Stop the app first if you need to look at it.
 ## Troubleshooting
 
 **Everything says "text only" and mentions the model endpoint.** The app cannot
-reach Docker Model Runner. Check `docker model status`, turn it on with
-`docker desktop enable model-runner`, then hit Retry on the document.
+reach the model. On the built-in runner, check `docker model status`, turn it on
+with `docker desktop enable model-runner`, then hit Retry on the document. On an
+endpoint of your own, press Test on the Settings page first — it names the
+address, the dialect and whether a service token was sent, which is usually the
+whole answer.
+
+**The endpoint answers with a web page instead of an answer.** Something in front
+of the model server — nearly always Cloudflare Access — refused the request
+before it got there, and a sign-in page arrived where JSON was expected. If the
+endpoint is behind a Cloudflare tunnel, put the service token's client id and
+secret on the Settings page. If they are already there, the token itself was
+refused: it has been revoked, or whoever runs the tunnel has not added it to the
+policy for that hostname. A 401 is the other failure and a different one — that
+is the model server rejecting the API key, after Cloudflare had already let the
+request through.
 
 **A document says "unreadable".** No text could be read from any page, which
 means the text model could not read the page images. Check that a model is

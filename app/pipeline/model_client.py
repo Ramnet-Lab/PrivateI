@@ -433,6 +433,53 @@ BIND_HINT = (
 )
 
 
+# What a rejection at somebody else's door looks like from in here.
+#
+# Cloudflare Access sits in front of an endpoint and answers a request it will
+# not pass with a page meant for a human: a 302 that requests follows, unasked,
+# to a 200 of HTML, or a bare 403 whose body is markup rather than JSON. None of
+# it reaches the application behind the door, so none of it is an error the
+# model server produced and none of the usual advice applies to it. A page where
+# JSON was expected is the whole signature. It is worth a sentence rather than
+# two hundred bytes of markup, because the two remedies are not
+# interchangeable: a token that was never sent is pasted in by the operator, and
+# a token that was sent and refused has to be put into the policy by whoever
+# runs the tunnel.
+ACCESS_HOSTS = ("cloudflareaccess.com", "cloudflareaccess.org")
+
+
+def _looks_like_web_page(body: bytes | str = b"", content_type: str = "") -> bool:
+    """Whether a reply is a page for a browser rather than an answer for us.
+
+    The body test is a leading match and deliberately not a search: a JSON error
+    message that happens to quote markup is the endpoint talking, and reporting
+    that as a sign-in page would send an operator to check a token that is
+    working perfectly.
+    """
+    if "html" in (content_type or "").lower():
+        return True
+    head = body[:512]
+    if isinstance(head, (bytes, bytearray)):
+        head = head.decode("utf-8", "replace")
+    head = head.lstrip().lower()
+    return head.startswith("<!doctype html") or head.startswith("<html")
+
+
+def _names_access(body: bytes | str = b"") -> bool:
+    """Whether the page says in so many words that it is Cloudflare Access.
+
+    The wording is upgraded from "something in front of this endpoint" only when
+    the page names itself. Cloudflare's markup is not a contract, so when it
+    stops saying either of these the diagnosis degrades to the vaguer sentence
+    and the remedy still names the token.
+    """
+    head = body[:4000]
+    if isinstance(head, (bytes, bytearray)):
+        head = head.decode("utf-8", "replace")
+    head = head.lower()
+    return any(host in head for host in ACCESS_HOSTS) or "cf-access" in head
+
+
 def _normalize_url(url: str) -> str:
     """Guarantee exactly one /v1 with no trailing slash, wherever it came from.
 
@@ -477,6 +524,12 @@ class _UnixHTTP:
     truncation detection, and the host-side users of this module (scripts,
     preflight checks) only ever need whole responses. stream() falls back to a
     single non-streamed request on this transport.
+
+    No credential has ever travelled this transport and none may: it reaches the
+    built-in runner over a local socket, which is behind nothing and has nothing
+    to check. That is why the single header below can stay hardcoded - a client
+    carrying a credential refuses the socket instead, at the socket_path line in
+    ModelRunner.__init__, rather than silently dropping one here.
     """
 
     def __init__(self, socket_path: str):
@@ -534,7 +587,9 @@ class ModelRunner:
     def __init__(self, url: str | None = None, timeout: int | None = None,
                  retries: int | None = None, keep_alive: str | None = None,
                  api_key: str | None = None, allow_override: bool = True,
-                 flavor: str | None = None, from_settings: bool | None = None):
+                 flavor: str | None = None, from_settings: bool | None = None,
+                 cf_client_id: str | None = None,
+                 cf_client_secret: str | None = None):
         # keep_alive is accepted and ignored: residency is Model Runner's own
         # business. Old env names are honoured so an existing .env keeps
         # working after the swap.
@@ -552,16 +607,27 @@ class ModelRunner:
         # caught. It raises when the operator has selected an endpoint that
         # cannot be used, and answering that with the local model would be the
         # substitution this whole mechanism exists to prevent.
-        override_url, override_key = "", ""
+        override_url = override_key = ""
+        override_cf_id = override_cf_secret = ""
         override_flavor = ""
         if url is None and allow_override:
             from .llm_settings import api_flavor, client_override
-            override_url, override_key = client_override()
+            override = client_override()
+            override_url, override_key = override.url, override.api_key
+            # Cloudflare Access is a property of the endpoint, so it is resolved
+            # with the endpoint and on the same terms: the mode decides, not the
+            # presence of a stored value, and local mode hands back nothing at
+            # all.
+            override_cf_id = override.cf_client_id
+            override_cf_secret = override.cf_client_secret
             # The dialect is read on exactly the clients that read the endpoint
-            # - a bare one, in external mode. Embeddings and transcription name
-            # their url and pass allow_override=False, so they never reach this
-            # branch and stay on the OpenAI dialect they have always spoken,
-            # whatever the operator ticked for the text model.
+            # - a bare one, in external mode. Embeddings name their url and pass
+            # allow_override=False, so they never reach this branch and stay on
+            # the OpenAI dialect they have always spoken, carrying no credential
+            # of any kind, whatever this page is set to. Transcription is NOT
+            # insulated and is not meant to be: it builds a bare client on
+            # purpose, so it resolves the same endpoint, the same key and the
+            # same service token as every other stage.
             override_flavor = api_flavor()
         # Anything that is not exactly the native marker is the OpenAI dialect.
         # That is the behaviour that existed before this setting, so an unset
@@ -576,12 +642,12 @@ class ModelRunner:
         # this endpoint does not serve is a different remedy in each case.
         #
         # A caller that resolved the address itself has to be able to say so.
-        # Transcription does exactly that: it names its endpoint explicitly so
-        # that nothing can substitute one underneath it, and without this
-        # argument its errors would advise setting MODEL_URL - an environment
-        # variable the operator never touched, when the address in fact came
-        # from a field on the settings page. None keeps the old inference, so
-        # every existing caller behaves exactly as it did.
+        # The settings page's two checks do exactly that: they name the endpoint
+        # they are testing so that nothing can substitute one underneath them,
+        # and without this argument their errors would advise setting MODEL_URL
+        # - an environment variable the operator never touched, when the address
+        # in fact came from a field on the page. None keeps the old inference,
+        # so every existing caller behaves exactly as it did.
         self.from_settings = (bool(override_url) if from_settings is None
                               else bool(from_settings))
         raw_url = (url or override_url
@@ -592,6 +658,39 @@ class ModelRunner:
         self.url = (_native_url(raw_url or DEFAULT_URL) if self.is_ollama
                     else _normalize_url(raw_url or DEFAULT_URL))
         self.api_key = api_key if api_key is not None else override_key
+        # Resolved here rather than read at request time, for three reasons that
+        # all point the same way. _headers() is called from a daemon thread in
+        # _send_cancellable, and a settings read there would open a sqlite
+        # connection on a thread nobody joins. It is also called inside the
+        # retry loop, where anything that raises is treated as a network fault
+        # and asked again. And a token read later could belong to a different
+        # endpoint than the one self.url was resolved against, which is the
+        # substitution this class exists to prevent.
+        self.cf_client_id = (cf_client_id if cf_client_id is not None
+                             else override_cf_id)
+        self.cf_client_secret = (cf_client_secret if cf_client_secret is not None
+                                 else override_cf_secret)
+        # Both halves or neither, settled at construction. A client carrying one
+        # header is not a client that can be used for anything, so it is refused
+        # now rather than on the first request - and refused as our own error
+        # type, because that is the one this pipeline knows how to show. It is
+        # refused here and not in _headers() on purpose: _headers() runs inside
+        # the retry loop and on the daemon thread, where an exception is either
+        # retried three times as a network fault or raised where nobody is
+        # waiting for it.
+        if bool(self.cf_client_id) != bool(self.cf_client_secret):
+            raise ModelRunnerError(
+                "a Cloudflare Access service token needs both a client id and "
+                "a client secret - one header alone is refused at the edge "
+                "with a sign-in page rather than an answer")
+        # requests strips the Authorization header when a redirect crosses to
+        # another host, and forwards every other header untouched - so on a 302
+        # the client secret would travel to whatever answered while the key that
+        # was safe to send is dropped, which is exactly backwards. A client
+        # carrying a token therefore does not follow redirects at all, and says
+        # so when it meets one. Scoped to that case alone: a client with no
+        # token keeps today's behaviour byte for byte.
+        self.follow_redirects = not (self.cf_client_id and self.cf_client_secret)
         self.timeout = timeout if timeout is not None else (
             env_int("MODEL_TIMEOUT", 0) or env_int("OLLAMA_TIMEOUT", 1800))
         self.retries = max(1, retries if retries is not None else (
@@ -600,9 +699,9 @@ class ModelRunner:
         # client pointed anywhere else must not use it - it would ignore the
         # address entirely and quietly answer from the local model.
         # Only an override sends this client somewhere the socket cannot
-        # reach. A caller naming the local address explicitly - embeddings do,
-        # transcription does - still wants the socket, and blanking it for them
-        # quietly moved those calls onto TCP.
+        # reach. A caller naming the local address explicitly - embeddings do -
+        # still wants the socket, and blanking it for them quietly moved those
+        # calls onto TCP.
         # The socket reaches the local runner and nothing else, so it is kept
         # only when this client is actually pointed there. Deciding on "did an
         # override supply the url" was wrong in one direction that mattered:
@@ -617,7 +716,15 @@ class ModelRunner:
         # relying on that would make the socket depend on a suffix rather than
         # on what is actually true, which is that the built-in runner does not
         # speak this dialect.
-        self.socket_path = ("" if self.is_ollama else
+        # A client carrying Access headers is by definition pointed at an
+        # endpoint behind somebody's door, and the socket transport builds its
+        # own headers and would drop both - the same silent substitution this
+        # block already exists to prevent, one credential further on. The test
+        # is OR rather than AND so that it still holds for the half-configured
+        # state, which the constructor refuses above but which no longer needs
+        # this line to be reasoned about separately.
+        self.socket_path = ("" if self.is_ollama or self.cf_client_id
+                            or self.cf_client_secret else
                             (os.environ.get("MODEL_RUNNER_SOCKET", "")
                              if self.url == local else ""))
         self.session = requests.Session()
@@ -651,16 +758,95 @@ class ModelRunner:
         return BIND_HINT.format(url=self.url)
 
     def _headers(self) -> dict:
-        """Request headers, carrying the key only when one is configured.
+        """Request headers, carrying each credential only when it is configured.
 
-        The key is put here and nowhere else: not in the URL, not in a log
-        line, not in an exception. A remote endpoint needs it; the local runner
-        neither needs nor sees one.
+        Two doors, two credentials, and both are put here and nowhere else: not
+        in the URL, not in a log line, not in an exception. The Authorization
+        header is read by the model server; the CF-Access pair is read by
+        Cloudflare in front of it, which strips both before passing the request
+        through. Neither substitutes for the other - an endpoint behind Access
+        needs the token to get through the door and the key to be answered once
+        inside - so the pair is added alongside the key and never instead of it.
+
+        The pair is written only when both halves are present. One header is not
+        a weaker credential: Cloudflare looks the token up by its id and checks
+        the secret against it, so a lone header is answered with a sign-in page,
+        and a sign-in page is not something the caller five frames up can read.
+        The constructor refuses that state outright; this condition is the
+        second lock on the same door.
+
+        There is no scrubbing anywhere downstream of this method. The secrets
+        stay out of error text because they are never put into it, an invariant
+        held by hand at these three lines and nowhere else.
         """
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
+        if self.cf_client_id and self.cf_client_secret:
+            headers["CF-Access-Client-Id"] = self.cf_client_id
+            headers["CF-Access-Client-Secret"] = self.cf_client_secret
         return headers
+
+    def _access_note(self, body: bytes | str = b"", content_type: str = "") -> str:
+        """The sentence to add when a reply is a web page, or "" when it is not.
+
+        One line, deliberately. Callers of this pipeline print the first line of
+        an error and the settings page prints nothing else at all, so a
+        diagnosis on the second line is a diagnosis nobody reads.
+
+        The remedy depends on what this client actually sent, which is why this
+        is a method and not a constant. An endpoint that answers with a sign-in
+        page when no token was sent is asking for one; the same page when a
+        token WAS sent means that token was refused. A different person fixes
+        each, and sending an operator back to re-check a token they typed
+        correctly is how an afternoon disappears.
+        """
+        if not _looks_like_web_page(body, content_type):
+            return ""
+        if self._is_local_runner():
+            # The built-in runner is behind nothing. Offering Cloudflare as an
+            # explanation to an operator who has never heard of it is the same
+            # misdirection as the /v1 advice this sits next to, and it is the
+            # misdirection this whole method exists to remove.
+            return (" Something answered in front of the local model runner, "
+                    "which is unusual - check MODEL_URL and any proxy on this "
+                    "machine.")
+        edge = ("Cloudflare Access" if _names_access(body)
+                else "something in front of this endpoint")
+        if self.cf_client_id and self.cf_client_secret:
+            return (f" {edge} answered instead of the model server, and the "
+                    f"service token was sent with the request - so it is the "
+                    f"token that was refused: check the client id and secret on "
+                    f"the settings page, and ask whoever runs the tunnel "
+                    f"whether that token is in the policy for this hostname.")
+        return (f" {edge} answered instead of the model server, and no "
+                f"Cloudflare Access service token was sent - if this endpoint "
+                f"is behind a Cloudflare tunnel, paste the token's client id "
+                f"and secret on the settings page.")
+
+    def _is_local_runner(self) -> bool:
+        """Whether this client is pointed at the built-in Model Runner."""
+        local = _normalize_url(env_str("MODEL_URL", "")
+                               or env_str("OLLAMA_URL", "") or DEFAULT_URL)
+        return (not self.is_ollama) and self.url == local
+
+    def _raise_redirect(self, response) -> None:
+        """Refuse a redirect rather than follow it carrying a secret.
+
+        Only reachable on a client that has a service token, because only such a
+        client stops following redirects. A tunnel that redirects is a tunnel
+        whose address is not quite the one that answers, and the fix is the
+        address rather than anything about the token - said here, because the
+        alternative was the secret arriving at whatever host the hop named.
+        """
+        if not (300 <= response.status_code < 400):
+            return
+        raise ModelRunnerError(
+            f"{self.url} answered {response.status_code} and asked the request "
+            f"to be sent somewhere else. It was not followed, because a "
+            f"redirect that crosses to another host would carry the Cloudflare "
+            f"Access client secret to it while dropping the API key - point the "
+            f"endpoint at the address that answers directly.")
 
     def _post(self, path: str, payload: dict, *, stream: bool = False):
         """POST with retry on connection errors and 5xx.
@@ -704,6 +890,10 @@ class ModelRunner:
                     raise Cancelled(_cancel_message(token))
                 streaming = False
                 try:
+                    # Before the status tests, because an unfollowed 3xx is
+                    # neither a success nor an error by their reckoning and
+                    # would otherwise fall through to be parsed as an answer.
+                    self._raise_redirect(response)
                     if response.status_code >= 500:
                         raise ModelRunnerError(
                             f"Model Runner returned {response.status_code}: "
@@ -712,6 +902,26 @@ class ModelRunner:
                         self._raise_api_error(response.status_code,
                                               self._read(response, token))
                     if stream:
+                        # A 200 that is a web page is not a stream. Every line
+                        # of a sign-in page fails the "data:" test in the reader
+                        # downstream, so the whole page was discarded in silence
+                        # and the run was told the stream had been cut - advice
+                        # about a local Docker feature, for a request that never
+                        # left the edge. Refused here, before streaming is set,
+                        # so the finally below still closes the response and
+                        # releases it from the cancellation token.
+                        ctype = (response.headers.get("Content-Type") or "")
+                        if _looks_like_web_page(b"", ctype):
+                            head = b""
+                            for chunk in response.iter_content(2048):
+                                head = chunk or b""
+                                break
+                            raise ModelRunnerError(
+                                f"{self.url} answered with a web page instead "
+                                f"of a stream."
+                                + (self._access_note(head, ctype)
+                                   or " Something answered in front of the "
+                                      "model server."))
                         streaming = True
                         return response
                     return self._read(response, token)
@@ -736,7 +946,14 @@ class ModelRunner:
                     self._backoff(attempt, token)
             except ModelRunnerError as exc:
                 last = exc
-                if attempt < self.retries and "returned 5" in str(exc):
+                # Anchored rather than searched. The 5xx messages above are the
+                # only two this is meant to match, and both begin with these
+                # words - while the text it is matched against can carry up to
+                # 300 characters of a response body, so a 403 whose body
+                # happened to contain the phrase was retried three times with
+                # backoff before the operator saw the refusal.
+                if (attempt < self.retries
+                        and str(exc).startswith("Model Runner returned 5")):
                     self._backoff(attempt, token)
                 else:
                     raise
@@ -772,7 +989,8 @@ class ModelRunner:
         if token is None:
             return self.session.post(
                 f"{self.url}{path}", data=body, stream=True,
-                headers=self._headers(), timeout=self.timeout)
+                headers=self._headers(), timeout=self.timeout,
+                allow_redirects=self.follow_redirects)
         return self._send_cancellable(path, body, token)
 
     def _send_cancellable(self, path: str, body: bytes, token: CancelToken):
@@ -799,7 +1017,8 @@ class ModelRunner:
             try:
                 outcome["response"] = self.session.post(
                     f"{self.url}{path}", data=body, stream=True,
-                    headers=self._headers(), timeout=self.timeout)
+                    headers=self._headers(), timeout=self.timeout,
+                    allow_redirects=self.follow_redirects)
             except BaseException as exc:   # re-raised on the waiting thread
                 outcome["error"] = exc
             finally:
@@ -898,6 +1117,21 @@ class ModelRunner:
                 f"read. Raise it with: docker model configure --context-size "
                 f"<tokens> <model>, or set TEXT_NUM_CTX in .env and rebuild.",
                 sent=sent, window=window)
+        # After the overflow check and never before it: that one raises on a 400
+        # whose body is JSON naming the window, and this one rewrites the text of
+        # a refusal whose body is a web page. The two cannot both describe one
+        # reply, and the overflow is the more specific reading of the pair.
+        note = self._access_note(body)
+        if note:
+            # The body is a page, so the 300 characters of it that used to be
+            # the whole message were 300 characters of markup - and every caller
+            # in this pipeline prints the first line, which made the message
+            # "Model Runner rejected the request (403): <!DOCTYPE html>" and
+            # nothing else. The prefix stays, for the reason just above it; what
+            # follows it is the diagnosis, and the markup moves to a line that
+            # survives in a log without crowding a page.
+            text = (f"Model Runner rejected the request ({status}):{note}"
+                    f"\nThe reply began: {body[:200]!r}")
         if self.is_ollama and "think" in message.lower():
             # Ollama grew its "think" field in 0.9. Older servers ignore an
             # unknown field, and newer ones reject it for models that cannot
@@ -909,16 +1143,31 @@ class ModelRunner:
                      "then stays at the server's default), or update Ollama.")
         raise ModelRunnerError(text)
 
-    @staticmethod
-    def _parse_json(raw) -> dict:
+    def _parse_json(self, raw) -> dict:
         """Bodies are parsed defensively: an HTML error page from a proxy or a
         half-written body must surface as our error type, not a JSONDecodeError
-        five frames up."""
+        five frames up.
+
+        This is where a rejection at the edge actually lands, and lands looking
+        like nothing in particular. requests follows the 302 to a sign-in page
+        without being asked, so what arrives is a 200 of HTML that
+        raise_for_status is perfectly happy with - and the operator was handed
+        two hundred bytes of markup and left to work out that their request
+        never reached the model at all.
+        """
         data = raw if isinstance(raw, (bytes, str)) else raw.content
         try:
             return json.loads(data)
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             head = (data[:200] if isinstance(data, (bytes, bytearray)) else str(data)[:200])
+            note = self._access_note(data)
+            if note:
+                # The markup goes on a second line: it is worth having in a log
+                # and worth nothing on the settings page, which shows the first
+                # line and no more.
+                raise ModelRunnerError(
+                    f"{self.url} answered with a web page where a JSON reply "
+                    f"was expected.{note}\nThe reply began: {head!r}") from exc
             raise ModelRunnerError(f"Model Runner sent a non-JSON reply: {head!r}") from exc
 
     # -- introspection --------------------------------------------------------
@@ -941,7 +1190,12 @@ class ModelRunner:
                 # report as a broken endpoint.
                 listing = "/api/tags" if self.is_ollama else "/models"
                 response = self.session.get(f"{self.url}{listing}", timeout=30,
-                                            headers=self._headers())
+                                            headers=self._headers(),
+                                            allow_redirects=self.follow_redirects)
+                # Before raise_for_status, which does not fire on a 3xx and
+                # would let an unfollowed redirect through to be parsed as a
+                # model list.
+                self._raise_redirect(response)
                 response.raise_for_status()
                 data = response.content
         except requests.exceptions.HTTPError as exc:
@@ -951,6 +1205,14 @@ class ModelRunner:
             # permission, 404 usually a base URL missing its /v1.
             status = (exc.response.status_code
                       if exc.response is not None else "an error")
+            body = (exc.response.content if exc.response is not None else b"")
+            ctype = ((exc.response.headers.get("Content-Type") or "")
+                     if exc.response is not None else "")
+            note = self._access_note(body, ctype)
+            if note:
+                raise ModelRunnerError(
+                    f"{self.url} answered {status} with a web page instead of "
+                    f"a model list.{note}") from exc
             # The /v1 remedy is the wrong advice on the native path, where the
             # suffix is removed on purpose: a 404 there means the address is
             # not an Ollama server, or is a proxy in front of one.
@@ -958,10 +1220,22 @@ class ModelRunner:
                       "server - untick the Ollama box if it is not."
                       if self.is_ollama else
                       "a 404 usually means the address needs its /v1 suffix.")
+            # A JSON refusal is the endpoint's own, which is worth saying out
+            # loud when there is a door in front of it: the request got through
+            # the door and was turned away on the other side. Telling an
+            # operator to check their service token for that sends them to the
+            # wrong person entirely, and it is the one thing they cannot
+            # discover from the reply themselves.
+            behind = (" The reply is the endpoint's own rather than a sign-in "
+                      "page, so the service token got past Cloudflare Access "
+                      "and this refusal came from the model server behind it."
+                      if self.cf_client_id else "")
             raise ModelRunnerError(
                 f"{self.url} answered {status}. The address is reachable, so "
-                f"check the model endpoint settings - a 401 means the API key, "
-                f"{remedy}"
+                f"check the model endpoint settings - a 401 means the API key "
+                f"the endpoint itself checks, a 403 means either that key is "
+                f"not allowed to do this or something in front of the endpoint "
+                f"refused the request, {remedy}{behind}"
             ) from exc
         except (requests.exceptions.RequestException, OSError) as exc:
             raise ModelRunnerError(self._bind_hint()) from exc
@@ -1013,11 +1287,22 @@ class ModelRunner:
         try:
             response = self.session.post(f"{self.url}/api/show", data=body,
                                          headers=self._headers(),
-                                         timeout=CAPABILITY_TIMEOUT)
+                                         timeout=CAPABILITY_TIMEOUT,
+                                         allow_redirects=self.follow_redirects)
         except (requests.exceptions.RequestException, OSError) as exc:
             return Capabilities(
                 False, detail=f"{self.url} could not be asked about {model}: {exc}")
         try:
+            if 300 <= response.status_code < 400:
+                # Only reachable on a client that carries a token, which is the
+                # one kind that stops following redirects. Named rather than
+                # left to fall through the test below into json.loads(b"") and
+                # be reported as a non-JSON reply with no diagnosis at all.
+                return Capabilities(
+                    False,
+                    detail=(f"{self.url}/api/show answered "
+                            f"{response.status_code} and redirected, which was "
+                            f"not followed while a service token is in force"))
             if response.status_code >= 400:
                 # A 404 here is usually a model this server does not have, and
                 # a 401 is the key. Either way the caller's own model check
@@ -1026,12 +1311,15 @@ class ModelRunner:
                 return Capabilities(
                     False,
                     detail=(f"{self.url}/api/show answered "
-                            f"{response.status_code} for {model}"))
+                            f"{response.status_code} for {model}"
+                            f"{self._access_note(response.content)}"))
             try:
                 parsed = json.loads(response.content)
             except (json.JSONDecodeError, UnicodeDecodeError):
                 return Capabilities(
-                    False, detail=f"{self.url}/api/show sent a non-JSON reply")
+                    False,
+                    detail=(f"{self.url}/api/show sent a non-JSON reply"
+                            f"{self._access_note(response.content)}"))
         finally:
             response.close()
         listed = parsed.get("capabilities") if isinstance(parsed, dict) else None
