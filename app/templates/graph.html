@@ -1,8 +1,19 @@
 {% extends "base.html" %}
+{% block title %}Graph{% endblock %}
 {% block main_attrs %} class="full"{% endblock %}
 {% block content %}
-<div class="graph-wrap">
+<div class="graph-wrap" id="graphWrap">
   <div id="net"></div>
+
+  {# Inside the canvas box rather than in the toolbar, and deliberately. The
+     failure this defends against is a screenshot cropped to the plot and
+     forwarded to somebody who did not set the filters: a status line outside
+     the crop tells them nothing, and 183 dashed lines with no evidence behind
+     them read as a graph. The dashed ring around the plot comes with it, so the
+     warning survives even where the banner is scrolled past. #}
+  <div id="inferenceOnly" class="inference-banner" role="status" hidden>
+    Inference only &mdash; nothing on screen was said by a document.
+  </div>
 
   <aside id="panel" class="panel">
     <p class="panel-empty">Click any node to see what it is connected to, and the
@@ -11,15 +22,53 @@
 
   <div class="graph-tools">
     <input id="search" type="search" placeholder="find a name…" autocomplete="off">
-    <select id="typeFilter">
-      <option value="">all types</option>
-      <option>PERSON</option><option>ORG</option><option>LOCATION</option>
-      <option>EVENT</option><option>DOCUMENT</option><option>CLAIM</option>
-    </select>
-    <label class="small" title="Connections a model inferred by comparing two entities. Not drawn from any document.">
-      <input type="checkbox" id="showInferred"> inferred links</label>
+
+    <div class="dd" id="typeDd">
+      <button type="button" class="btn dd-btn" id="typeBtn"
+              aria-haspopup="true" aria-expanded="false" aria-controls="typePop">
+        <span class="dd-name">Types</span>
+        <span class="dd-sum" id="typeSum">all</span>
+        <span class="dd-caret" aria-hidden="true">&#9662;</span>
+      </button>
+      <div class="dd-pop" id="typePop" role="group" aria-label="Entity types" hidden>
+        <div class="dd-list" id="typeList"></div>
+        <div class="dd-foot">
+          <button type="button" class="dd-reset" data-reset="type">show every type</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="dd" id="linkDd">
+      <button type="button" class="btn dd-btn" id="linkBtn"
+              aria-haspopup="true" aria-expanded="false" aria-controls="linkPop">
+        <span class="dd-name">Links</span>
+        <span class="dd-sum" id="linkSum">all stated</span>
+        <span class="dd-caret" aria-hidden="true">&#9662;</span>
+      </button>
+      {# type="text", not type="search": Chrome and Safari let Escape clear a
+         non-empty search field and swallow the event, so the first press would
+         appear to do nothing and the popover would refuse to close. #}
+      <div class="dd-pop wide" id="linkPop" role="group" aria-label="Kinds of link" hidden>
+        <input type="text" class="dd-find" id="linkFind" autocomplete="off"
+               placeholder="filter these kinds…"
+               aria-label="Filter the list of link kinds">
+        <div class="dd-list" id="linkList"></div>
+        <p class="dd-none" id="linkNone" hidden>nothing here matches that</p>
+        <div class="dd-foot">
+          <label class="dd-orphan">
+            <input type="checkbox" id="hideOrphans">
+            <span id="hideOrphansText">hide entities left with no links</span>
+          </label>
+          <p class="dd-hint">Arrow keys move down the list; <kbd>only</kbd> on a
+            row shows that kind alone. From the keyboard, clear the heading box
+            then press Space on one row.</p>
+          <button type="button" class="dd-reset" data-reset="link">reset to stated only</button>
+        </div>
+      </div>
+    </div>
+
     <button id="refit" class="btn">Fit</button>
-    <span id="graphStatus" class="small"></span>
+    <span id="graphStatus" class="small" role="status" aria-live="polite"></span>
   </div>
 </div>
 {% endblock %}

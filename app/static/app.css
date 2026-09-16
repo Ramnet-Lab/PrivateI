@@ -3,6 +3,11 @@
   --bg: #14161a; --panel: #1c1f26; --line: #2c313b; --text: #e6e8ec;
   --muted: #939aa8; --accent: #4a9eff; --ok: #3fa06a; --warn: #d97706;
   --danger: #d0453c;
+  /* The one colour that means "a model said this, no document did". It must
+     stay equal to INFERRED_COLOR in graph.js, which is what vis actually draws
+     the dashed edges with; the two are separate because CSS cannot read a JS
+     constant and a legend that disagrees with the picture is worse than none. */
+  --inferred: #c264d6;
 }
 * { box-sizing: border-box; }
 /* A class rule that sets display beats the browser's own [hidden] rule,
@@ -93,9 +98,122 @@ td.quote { color: var(--muted); font-size: 12px; max-width: 380px; }
 .facts em { font-style: normal; color: var(--muted); }
 .facts blockquote { margin: 5px 0; padding-left: 10px; border-left: 2px solid var(--line);
   color: #cfd4dd; font-size: 12px; }
+/* The status line has grown from "N of M entities shown" into three clauses that
+   must not be truncated, so it wraps onto its own row under the controls rather
+   than pushing the toolbar across the canvas and under the 370px panel. */
 .graph-tools { position: absolute; top: 14px; left: 14px; display: flex; gap: 8px;
-  align-items: center; background: rgba(28, 31, 38, .96); padding: 8px 10px;
+  align-items: center; flex-wrap: wrap; z-index: 5;
+  max-width: min(760px, calc(100% - 420px));
+  background: rgba(28, 31, 38, .96); padding: 8px 10px;
   border: 1px solid var(--line); border-radius: 8px; }
+.graph-tools #search { width: 150px; }
+#graphStatus { flex-basis: 100%; margin-top: 1px; }
+
+/* --- the inference-only warning ------------------------------------------- */
+/* Both of these live inside .graph-wrap, which is the box a screenshot of "the
+   graph" gets cropped to. A warning in the toolbar would be outside that crop,
+   and the state it warns about - a canvas showing nothing but a model's guesses
+   - is reachable in one click from the "only" button. */
+.inference-banner { position: absolute; top: 0; left: 0; right: 0; z-index: 6;
+  padding: 7px 14px; text-align: center; font-size: 13px; font-weight: 600;
+  color: #f0d4f8; background: rgba(60, 26, 72, .97);
+  border-bottom: 2px dashed var(--inferred); }
+.graph-wrap.inference-only::after { content: ''; position: absolute; inset: 0;
+  pointer-events: none; z-index: 4; border: 2px dashed var(--inferred); }
+.graph-wrap.inference-only .graph-tools,
+.graph-wrap.inference-only .panel { top: 52px; }
+.graph-wrap.inference-only .panel { max-height: calc(100% - 66px); }
+
+/* --- multi-select dropdowns ----------------------------------------------- */
+/* A button and a popover rather than <select multiple>: a native multi-select
+   draws no checkboxes, needs ctrl-click to keep a selection (one stray click
+   and the other 38 choices are gone), cannot carry a count or a group heading,
+   and renders as a fixed-height listbox that is not a dropdown at all. The
+   controls inside are real checkboxes in a plain div, so Tab and Space stay the
+   browser's job and there is no roving tabindex to get wrong. */
+.dd { position: relative; }
+.dd-btn { display: inline-flex; align-items: center; gap: 6px; max-width: 240px; }
+.dd-name { color: var(--muted); }
+.dd-sum { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dd-caret { color: var(--muted); font-size: 10px; }
+.dd.open .dd-btn { border-color: var(--accent); }
+
+.dd-pop { position: absolute; top: calc(100% + 6px); left: 0; z-index: 20;
+  width: 280px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 8px; padding: 8px; box-shadow: 0 12px 30px rgba(0, 0, 0, .55); }
+.dd-pop.wide { width: 350px; }
+.dd-find { width: 100%; margin: 0 0 6px; padding: 4px 8px; font-size: 13px; }
+/* overscroll-behavior: without it the wheel falls through to vis-network at the
+   end of the list and zooms the graph out from under the reader. */
+.dd-list { max-height: 320px; overflow-y: auto; overscroll-behavior: contain; }
+.dd-none { margin: 6px 2px 0; color: var(--muted); font-size: 12px; }
+
+.dd-group + .dd-group { margin-top: 10px; padding-top: 8px;
+  border-top: 1px solid var(--line); }
+/* Sticky, so that thirty rows into the stated tail the heading still says which
+   family you are ticking. That is the distinction surviving the scroll. */
+.dd-head { display: flex; align-items: center; gap: 8px; padding: 2px 0 4px;
+  position: sticky; top: 0; z-index: 1; background: var(--panel); }
+.dd-title { font-weight: 600; font-size: 13px; }
+/* Visible prose, not a title attribute: what separates a quoted fact from a
+   model's reading of two of them is not something to make anyone hover to
+   find out. */
+.dd-note { margin: 0 0 6px; color: var(--muted); font-size: 11px; line-height: 1.45; }
+
+.dd-row { display: flex; align-items: flex-start; gap: 8px;
+  padding: 3px 4px 3px 2px; border-radius: 4px; }
+.dd-row:hover { background: #23272f; }
+.dd-sub { margin-top: 4px; color: var(--muted); font-size: 12px; }
+.dd-pick { display: flex; align-items: flex-start; gap: 7px; flex: 1;
+  min-width: 0; cursor: pointer; }
+.dd-pick input { flex: none; margin: 3px 0 0; accent-color: var(--accent); }
+/* Two lines, not one with an ellipsis. Several of the one-off predicates are
+   whole sentences, and cut at 340px "has no firsthand knowledge relevant to…"
+   and "has no firsthand recollection of…" become the same row - and those are
+   exactly the rows where identity matters most. The full text is on the title.
+   The truncation is width-driven and identical on every row: an ellipsis that
+   looked content-driven would read as redaction. */
+.dd-label { min-width: 0; overflow: hidden; word-break: break-word;
+  display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2;
+  -webkit-box-orient: vertical; }
+.dd-count { flex: none; padding-top: 1px; color: var(--muted); font-size: 12px;
+  font-variant-numeric: tabular-nums; }
+/* Faint rather than hidden. This is the control that turns "show only
+   contradictions" from fifty-two clicks into one, and a feature revealed only
+   by hovering the right row is a feature nobody finds. */
+.dd-only { flex: none; opacity: .3; padding: 0 6px; font-size: 11px;
+  background: transparent; border: 1px solid var(--line); color: var(--muted); }
+.dd-row:hover .dd-only, .dd-only:focus-visible { opacity: 1; }
+.dd-only:hover { color: var(--text); border-color: var(--accent); }
+
+/* Geometry only; the colours are set from the same JS constants vis draws with,
+   so the legend cannot drift from the picture. Solid rule for an evidence edge,
+   dashed for an inference, a dot for an entity type - the popover is also the
+   legend this page has never had. */
+.dd-sw { flex: none; width: 16px; height: 0; margin-top: 10px;
+  border-top: 2px solid var(--muted); }
+.dd-sw.dashed { border-top-style: dashed; }
+.dd-sw.dot { width: 9px; height: 9px; margin-top: 5px;
+  border: 0; border-radius: 50%; }
+
+.dd-foot { display: flex; flex-direction: column; gap: 7px; margin-top: 8px;
+  padding-top: 8px; border-top: 1px solid var(--line); }
+.dd-hint { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.45; }
+.dd-hint kbd { font: inherit; padding: 0 3px; border: 1px solid var(--line);
+  border-radius: 3px; }
+.dd-orphan { display: flex; align-items: flex-start; gap: 7px; cursor: pointer;
+  font-size: 12px; color: var(--muted); line-height: 1.4; }
+.dd-orphan input { flex: none; margin: 2px 0 0; accent-color: var(--accent); }
+.dd-orphan input:disabled, .dd-orphan input:disabled + span { opacity: .5;
+  cursor: default; }
+.dd-reset { align-self: flex-start; padding: 0; border: 0; background: transparent;
+  color: var(--accent); font-size: 12px; text-decoration: underline; }
+
+/* The panel lists every connection on the record for an entity, which is not
+   what the canvas is showing once anything is filtered. Said at the moment it
+   could mislead, rather than left for the operator to infer. */
+.panel-note { margin: 6px 0 0; padding: 6px 8px; border-radius: 5px;
+  background: #23272f; color: var(--muted); font-size: 12px; line-height: 1.45; }
 
 /* --- timeline ----------------------------------------------------------- */
 .timeline { list-style: none; margin: 16px 0; padding: 0; }
