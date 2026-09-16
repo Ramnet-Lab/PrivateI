@@ -60,6 +60,36 @@ function Say([string]$Msg) {
     Write-Log $line
 }
 
+# The bash that can run scripts/pull-models.sh, or '' if there is none.
+#
+# Not `Get-Command bash`. On a default Windows install that finds
+# C:\Windows\System32\bash.exe, which is the WSL launcher - and on a machine
+# with no distro installed it answers "execvpe(/bin/bash) failed: No such file
+# or directory" and exits 1, which this script then reported as a model fetch
+# that went wrong. The one we want ships beside git, which is already a hard
+# requirement here, so it is looked for there first and by the same reasoning
+# everywhere else before PATH is trusted at all.
+function Get-BashPath {
+    $candidates = @()
+    $git = (Get-Command git -ErrorAction SilentlyContinue).Source
+    if ($git) {
+        # ...\Git\cmd\git.exe -> ...\Git\bin\bash.exe
+        $candidates += (Join-Path (Split-Path (Split-Path $git -Parent) -Parent) 'bin\bash.exe')
+    }
+    $candidates += (Join-Path $env:ProgramFiles 'Git\bin\bash.exe')
+    if (${env:ProgramFiles(x86)}) {
+        $candidates += (Join-Path ${env:ProgramFiles(x86)} 'Git\bin\bash.exe')
+    }
+    $candidates += (Join-Path $env:LOCALAPPDATA 'Programs\Git\bin\bash.exe')
+    foreach ($c in $candidates) {
+        if ($c -and (Test-Path $c)) { return $c }
+    }
+    # Last resort: whatever PATH has, unless it is the WSL launcher.
+    $onPath = (Get-Command bash -ErrorAction SilentlyContinue).Source
+    if ($onPath -and ($onPath -notlike "$env:SystemRoot\*")) { return $onPath }
+    return ''
+}
+
 function Get-WatcherPid {
     # A pidfile is only trusted if the process it names is actually alive;
     # a stale file from a crash or reboot counts as "not running".
@@ -138,16 +168,17 @@ function Invoke-CheckOnce {
     # missing interpreter is worth naming rather than reporting as a fetch that
     # went wrong.
     if (Test-Path (Join-Path $Root 'scripts/pull-models.sh')) {
-        if (Get-Command bash -ErrorAction SilentlyContinue) {
+        $bash = Get-BashPath
+        if ($bash) {
             $global:LASTEXITCODE = 0
-            $pullOut = bash ./scripts/pull-models.sh 2>&1 | ForEach-Object { '' + $_ }
+            $pullOut = & $bash ./scripts/pull-models.sh 2>&1 | ForEach-Object { '' + $_ }
             $pullCode = $LASTEXITCODE
             Write-Log $pullOut
             if ($pullCode -ne 0) {
                 Say 'model fetch reported a problem - see auto-update.log'
             }
         } else {
-            Say 'bash not on PATH - skipping the model fetch; run .\start.ps1 if a model is missing'
+            Say 'no Git bash found - skipping the model fetch; run .\start.ps1 if a model is missing'
         }
     }
     # --remove-orphans: a push that retires a service from the compose file
