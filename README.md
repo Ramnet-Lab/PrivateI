@@ -222,6 +222,15 @@ before it says Ready. Your documents, graph and settings survive all of it —
 nothing under `data/` is touched. `make up` does the same minus the `git pull`,
 for when you have your own changes on disk.
 
+The background watcher (`./auto-update.sh start`, `.\auto-update.ps1 Start`)
+does the same thing unattended, and does it whether or not the stack is up: a
+pull is always followed by a rebuild and a start. It used to rebuild only what
+it found already running, which meant a machine stopped overnight came back on
+whatever image was last built rather than on the code that had been pulled —
+and nothing said so, because a stale container and a current one look identical
+from outside. A checkout with local edits is still left alone entirely, and a
+history that has diverged from `origin/main` is reported rather than forced.
+
 One thing it deliberately does **not** do: change a model you have already
 chosen. `start.sh` only fills a blank key in `.env`, so an installation set up
 before a default changed keeps what it was set up with. That restraint is on
