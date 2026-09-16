@@ -37,10 +37,27 @@ if ("$Env:UPDATE_INTERVAL" -match '^\d+$') { $Interval = [int]$Env:UPDATE_INTERV
 $PidFile = Join-Path $Root '.auto-update.pid'
 $LogFile = Join-Path $Root 'auto-update.log'
 
+# Appending to the log is best-effort and must never be fatal. Windows takes an
+# exclusive write handle, so a second copy of this script - a manual Once while
+# the watcher is up, or a tail held open in another window - makes Add-Content
+# throw. That had two costs, and the second was the expensive one: an
+# unguarded Add-Content at the end of a pipeline leaves ITS failure in
+# $LASTEXITCODE, so a rebuild that docker completed perfectly was reported as
+# "rebuild FAILED". A few short retries cover the moment a rival writer holds
+# the handle; losing a log line is a worse outcome than losing nothing, and a
+# better one than lying about the build.
+function Write-Log($Lines) {
+    if ($null -eq $Lines) { return }
+    for ($attempt = 0; $attempt -lt 5; $attempt++) {
+        try { Add-Content -Path $LogFile -Value $Lines -Encoding ASCII; return }
+        catch { Start-Sleep -Milliseconds 150 }
+    }
+}
+
 function Say([string]$Msg) {
     $line = '{0} {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Msg
     Write-Output $line
-    try { Add-Content -Path $LogFile -Value $line -Encoding ASCII } catch { }
+    Write-Log $line
 }
 
 function Get-WatcherPid {
@@ -115,25 +132,35 @@ function Invoke-CheckOnce {
     # Models live on the host's Model Runner, not in the image, so a rebuild
     # does not fetch them. Never fatal here: this runs unattended and must not
     # leave a machine stopped because a registry was briefly unreachable - the
-    # app starts and reports the missing model itself.
+    # app starts and reports the missing model itself. The script is shell, so
+    # it needs the bash that ships with Git for Windows; git is already a
+    # requirement of this file, but bash is not always on PATH beside it, and a
+    # missing interpreter is worth naming rather than reporting as a fetch that
+    # went wrong.
     if (Test-Path (Join-Path $Root 'scripts/pull-models.sh')) {
-        $global:LASTEXITCODE = 0
-        bash ./scripts/pull-models.sh 2>&1 |
-            ForEach-Object { '' + $_ } |
-            Add-Content -Path $LogFile -Encoding ASCII
-        if ($LASTEXITCODE -ne 0) {
-            Say 'model fetch reported a problem - see auto-update.log'
+        if (Get-Command bash -ErrorAction SilentlyContinue) {
+            $global:LASTEXITCODE = 0
+            $pullOut = bash ./scripts/pull-models.sh 2>&1 | ForEach-Object { '' + $_ }
+            $pullCode = $LASTEXITCODE
+            Write-Log $pullOut
+            if ($pullCode -ne 0) {
+                Say 'model fetch reported a problem - see auto-update.log'
+            }
+        } else {
+            Say 'bash not on PATH - skipping the model fetch; run .\start.ps1 if a model is missing'
         }
     }
     # --remove-orphans: a push that retires a service from the compose file
     # must also retire its running container, or it lingers forever.
-    # A stale $LASTEXITCODE from an earlier command must not be read as
-    # this rebuild's verdict if docker itself fails to launch.
+    # The output is captured first and logged afterwards, so that the verdict
+    # below reads docker's exit code and not the log writer's - see Write-Log.
+    # A stale $LASTEXITCODE from an earlier command must not be read as this
+    # rebuild's verdict if docker itself fails to launch.
     $global:LASTEXITCODE = 1
-    docker compose up -d --build --remove-orphans 2>&1 |
-        ForEach-Object { '' + $_ } |
-        Add-Content -Path $LogFile -Encoding ASCII
-    if ($LASTEXITCODE -eq 0) {
+    $buildOut = docker compose up -d --build --remove-orphans 2>&1 | ForEach-Object { '' + $_ }
+    $buildCode = $LASTEXITCODE
+    Write-Log $buildOut
+    if ($buildCode -eq 0) {
         Say 'running on the new version'
     } elseif ($wasRunning) {
         Say 'rebuild FAILED - the old containers may still be running; see auto-update.log'
@@ -149,6 +176,15 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
 
 switch ($Verb) {
     'Once' {
+        # Not refused, because a manual nudge is a reasonable thing to want
+        # while the watcher is up - but said out loud, because the two race on
+        # the same checkout and the same compose project, and the loser of that
+        # race sees a pull that has already happened and a rebuild it did not
+        # start. Without this line that reads as this run having done nothing.
+        $alive = Get-WatcherPid
+        if ($alive -ne 0) {
+            Say "note: the background watcher is also running (pid $alive) - it may get there first"
+        }
         Invoke-CheckOnce
     }
     'Watch' {
