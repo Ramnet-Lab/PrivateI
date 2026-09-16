@@ -10,8 +10,13 @@
 # GitHub runner means handing this machine a repo token and a remote-execution
 # surface. Polling git gets the same outcome with neither.
 #
-# The containers are rebuilt and restarted ONLY when the stack is already
-# running; a stopped stack just gets the new code and stays stopped.
+# A pull is always followed by a rebuild and a start, whether or not the stack
+# was up. It used to rebuild only what it found already running, which meant a
+# machine that had been stopped for any reason came back on whatever image was
+# last built rather than on the code that had just been pulled - and said
+# nothing, because from the outside a stale container and a current one look
+# identical. Bringing a stopped stack up is the deliberate part of that: an
+# updater that leaves the new code unbuilt has not finished the update.
 #
 # Written for Windows PowerShell 5.1, ASCII only. Every line is also appended
 # to auto-update.log, because the hidden background watcher has no console -
@@ -94,29 +99,46 @@ function Invoke-CheckOnce {
     Say "pulled $last"
 
     # ps prints a header row even with nothing running, so count real service
-    # lines, not just any output.
+    # lines, not just any output. What this decides is only the wording: the
+    # rebuild happens either way.
     $running = @()
     try {
         $running = @(docker compose ps --status running --format '{{.Service}}' 2>$null |
             Where-Object { ('' + $_).Trim() -ne '' })
     } catch { }
-    if ($running.Count -gt 0) {
+    $wasRunning = ($running.Count -gt 0)
+    if ($wasRunning) {
         Say 'stack is running - rebuilding and restarting'
-        # --remove-orphans: a push that retires a service from the compose file
-        # must also retire its running container, or it lingers forever.
-        # A stale $LASTEXITCODE from an earlier command must not be read as
-        # this rebuild's verdict if docker itself fails to launch.
-        $global:LASTEXITCODE = 1
-        docker compose up -d --build --remove-orphans 2>&1 |
+    } else {
+        Say 'stack is not running - rebuilding and starting it on the new code'
+    }
+    # Models live on the host's Model Runner, not in the image, so a rebuild
+    # does not fetch them. Never fatal here: this runs unattended and must not
+    # leave a machine stopped because a registry was briefly unreachable - the
+    # app starts and reports the missing model itself.
+    if (Test-Path (Join-Path $Root 'scripts/pull-models.sh')) {
+        $global:LASTEXITCODE = 0
+        bash ./scripts/pull-models.sh 2>&1 |
             ForEach-Object { '' + $_ } |
             Add-Content -Path $LogFile -Encoding ASCII
-        if ($LASTEXITCODE -eq 0) {
-            Say 'restarted on the new version'
-        } else {
-            Say 'rebuild FAILED - the old containers may still be running; see auto-update.log'
+        if ($LASTEXITCODE -ne 0) {
+            Say 'model fetch reported a problem - see auto-update.log'
         }
+    }
+    # --remove-orphans: a push that retires a service from the compose file
+    # must also retire its running container, or it lingers forever.
+    # A stale $LASTEXITCODE from an earlier command must not be read as
+    # this rebuild's verdict if docker itself fails to launch.
+    $global:LASTEXITCODE = 1
+    docker compose up -d --build --remove-orphans 2>&1 |
+        ForEach-Object { '' + $_ } |
+        Add-Content -Path $LogFile -Encoding ASCII
+    if ($LASTEXITCODE -eq 0) {
+        Say 'running on the new version'
+    } elseif ($wasRunning) {
+        Say 'rebuild FAILED - the old containers may still be running; see auto-update.log'
     } else {
-        Say 'stack is not running - code updated, nothing restarted'
+        Say 'rebuild FAILED - nothing is running; see auto-update.log'
     }
 }
 

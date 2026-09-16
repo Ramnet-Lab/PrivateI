@@ -360,7 +360,14 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Step 'Starting services'
-Compose up -d
+# --build again, after the explicit build above: `up` is what actually decides
+# which image a container runs, and saying it here is what makes a start on
+# stale code impossible rather than merely unlikely. It costs nothing when the
+# build above already succeeded - every layer is cached.
+# --remove-orphans: a push that retires a service from the compose file must
+# also retire its running container, or it lingers forever, matching the
+# updater, which has always said this.
+Compose up -d --build --remove-orphans
 if ($LASTEXITCODE -ne 0) {
     Fail ("Could not start the services. See what they say:  {0} logs" -f $ComposeCmd)
 }

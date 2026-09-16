@@ -11,8 +11,13 @@
 # GitHub runner means handing this machine a repo token and a remote-execution
 # surface. Polling git gets the same outcome with neither.
 #
-# The containers are rebuilt and restarted ONLY when the stack is already
-# running; a stopped stack just gets the new code and stays stopped.
+# A pull is always followed by a rebuild and a start, whether or not the stack
+# was up. It used to rebuild only what it found already running, which meant a
+# machine that had been stopped for any reason came back on whatever image was
+# last built rather than on the code that had just been pulled - and said
+# nothing, because from the outside a stale container and a current one look
+# identical. Bringing a stopped stack up is the deliberate part of that: an
+# updater that leaves the new code unbuilt has not finished the update.
 
 set -Eeuo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
@@ -44,24 +49,29 @@ check_once() {
     say "pulled $(git log -1 --format='%h %s' | cut -c1-70)"
 
     # ps prints a header row even with nothing running, so count real
-    # container lines, not just any output.
+    # container lines, not just any output. What this decides is only the
+    # wording: the rebuild happens either way.
+    local was_running=0
     if [ "$(docker compose ps --status running --format '{{.Service}}' 2>/dev/null | grep -c . || true)" -gt 0 ]; then
+        was_running=1
         say "stack is running - rebuilding and restarting"
-        # --remove-orphans: a push that retires a service from the compose file
-        # must also retire its running container, or it lingers forever.
-        # Models live on the host's Model Runner, not in the image, so a
-        # rebuild does not fetch them. Never fatal here: this runs unattended
-        # and must not leave a machine stopped because a registry was briefly
-        # unreachable - the app starts and reports the missing model itself.
-        ./scripts/pull-models.sh >>"$LOGFILE" 2>&1 \
-            || say "model fetch reported a problem - see $LOGFILE"
-        if docker compose up -d --build --remove-orphans >>"$LOGFILE" 2>&1; then
-            say "restarted on the new version"
-        else
-            say "rebuild FAILED - the old containers may still be running; see $LOGFILE"
-        fi
     else
-        say "stack is not running - code updated, nothing restarted"
+        say "stack is not running - rebuilding and starting it on the new code"
+    fi
+    # Models live on the host's Model Runner, not in the image, so a rebuild
+    # does not fetch them. Never fatal here: this runs unattended and must not
+    # leave a machine stopped because a registry was briefly unreachable - the
+    # app starts and reports the missing model itself.
+    ./scripts/pull-models.sh >>"$LOGFILE" 2>&1 \
+        || say "model fetch reported a problem - see $LOGFILE"
+    # --remove-orphans: a push that retires a service from the compose file must
+    # also retire its running container, or it lingers forever.
+    if docker compose up -d --build --remove-orphans >>"$LOGFILE" 2>&1; then
+        say "running on the new version"
+    elif [ "$was_running" -eq 1 ]; then
+        say "rebuild FAILED - the old containers may still be running; see $LOGFILE"
+    else
+        say "rebuild FAILED - nothing is running; see $LOGFILE"
     fi
 }
 

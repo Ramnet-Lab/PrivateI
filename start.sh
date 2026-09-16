@@ -231,7 +231,14 @@ fi
 $COMPOSE build
 
 step "Starting services"
-$COMPOSE up -d
+# --build again, after the explicit build above: `up` is what actually decides
+# which image a container runs, and saying it here is what makes a start on
+# stale code impossible rather than merely unlikely. It costs nothing when the
+# build above already succeeded - every layer is cached.
+# --remove-orphans: a push that retires a service from the compose file must
+# also retire its running container, or it lingers forever, matching the
+# updater, which has always said this.
+$COMPOSE up -d --build --remove-orphans
 
 wait_healthy() {
   name="$1"; limit="${2:-180}"; waited=0
