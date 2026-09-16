@@ -215,6 +215,22 @@ td.quote { color: var(--muted); font-size: 12px; max-width: 380px; }
 .panel-note { margin: 6px 0 0; padding: 6px 8px; border-radius: 5px;
   background: #23272f; color: var(--muted); font-size: 12px; line-height: 1.45; }
 
+/* --- layout: reactive or static ------------------------------------------- */
+/* A segmented pair rather than a checkbox: "reactive" and "static" are two
+   named states and neither is the off-position of the other, and the two words
+   are the operator's own. */
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 5px;
+  overflow: hidden; }
+.seg-btn { border: 0; border-radius: 0; background: #23272f; color: var(--muted);
+  padding: 4px 10px; font-size: 13px; cursor: pointer; }
+.seg-btn + .seg-btn { border-left: 1px solid var(--line); }
+.seg-btn:hover { color: var(--text); }
+.seg-btn.on { background: #2f3d52; color: var(--text); }
+
+#layoutNote { flex-basis: 100%; margin-top: 1px; }
+#layoutNote.bad { color: #ffb3ad; }
+#layoutNote.pending { color: var(--warn); }
+
 /* --- timeline ----------------------------------------------------------- */
 .timeline { list-style: none; margin: 16px 0; padding: 0; }
 .timeline li { display: grid; grid-template-columns: 120px 1fr; gap: 16px;

@@ -59,6 +59,42 @@ const nodeHidden = new Map(), edgeHidden = new Map();
 // edges consisting of an id and a hidden flag, with no endpoints, into the graph.
 let inferredLive = false, inferredLoaded = false;
 
+// --- where the entities sit --------------------------------------------------
+//
+// A layout that arranges itself is the right first answer and the wrong last
+// one. Physics gets a graph nobody has read into a shape worth reading; after
+// that the investigator knows things about these entities that no force
+// simulation does, and the board they build by hand is a reading of the case.
+//
+// Two maps, and the difference between them is the whole model. A PIN is a
+// coordinate somebody chose: it is held with vis's `fixed`, it is drawn with a
+// ring, and nothing moves it again until it is released. A SEED is only where a
+// node happened to be sitting last time: it is replayed on load so the board
+// comes back recognisable, and then it is let go of, so an unpinned graph is
+// honestly still reactive.
+//
+// The pin has to be `fixed` and not `physics:false`, which is the opposite of
+// the flag the inferred edges carry, and for the opposite reason. A fixed node
+// stays in the simulation - it still repels its neighbours and still anchors
+// every spring attached to it - and `_performStep` simply zeroes its own force
+// and velocity. A node with physics off leaves the force calculation entirely,
+// and the other nodes then drift straight through it.
+const pins = new Map();       // id -> [x, y], placed by hand and held
+const seeds = new Map();      // id -> [x, y], where it last sat
+let absent = {};              // saved positions for entities not in this graph
+let layoutMode = 'reactive';
+// Nothing is written until a layout has been read back successfully. A failed
+// GET that was treated as "nothing saved yet" would let the first drag replace
+// a whole arrangement with a single pin.
+let layoutLoaded = false;
+// A stored version this build does not understand is never loaded AND never
+// overwritten, so a downgrade cannot eat a layout it cannot read.
+const LAYOUT_VERSION = 1;
+const PIN_RING = '#e6e8ec';
+const RELEASE_UNDO_MS = 12000;
+let released = null, releaseTimer = null, saveTimer = null;
+let saveInFlight = false, saveQueued = false;
+
 // At least this many one-off kinds, alongside at least one recurring kind,
 // before the list is worth splitting. Below that the sub-heading costs more
 // attention than it saves - which is why the 13 inferred relations render flat
@@ -125,11 +161,144 @@ async function load() {
   selected.type = new Set(order.type);       // everything the corpus has
   selected.stated = new Set(order.stated);   // every wording a document used
 
+  // Read before the network exists, so the arrangement can be asserted in the
+  // same breath as the construction rather than visibly applied after it.
+  await readLayout();
+
   buildTypeList();
   buildLinkList();
   build();
   applyFilters();
   loadInferred();
+}
+
+// --- reading and writing the arrangement ------------------------------------
+
+async function readLayout() {
+  let data;
+  try {
+    const res = await fetch('/api/graph/layout');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    data = await res.json();
+  } catch (err) {
+    // Deliberately leaves layoutLoaded false, which switches every write off
+    // for this session. A page that could not read the arrangement must not be
+    // the page that replaces it.
+    note('the saved arrangement could not be read, so nothing will be saved ' +
+         'this session — reload to try again', 'bad');
+    return;
+  }
+  const v = Number(data && data.v) || 0;
+  if (v > LAYOUT_VERSION) {
+    note(`the saved arrangement was written by a newer version of this page ` +
+         `(v${v}) and will not be changed here`, 'bad');
+    return;
+  }
+  for (const [id, xy] of Object.entries((data && data.pins) || {})) {
+    if (Array.isArray(xy) && xy.length === 2) pins.set(id, [+xy[0], +xy[1]]);
+  }
+  for (const [id, xy] of Object.entries((data && data.seeds) || {})) {
+    if (Array.isArray(xy) && xy.length === 2) seeds.set(id, [+xy[0], +xy[1]]);
+  }
+  absent = (data && typeof data.absent === 'object' && data.absent) || {};
+  layoutMode = data && data.mode === 'static' ? 'static' : 'reactive';
+  layoutLoaded = true;
+}
+
+// A saved position whose entity is not in this graph is set aside rather than
+// dropped. An entity id is "TYPE:normalised name", so deleting one document and
+// ingesting it again brings the very same ids back - and discarding these here
+// would make that cost the arrangement of everything in the file. Only a merge
+// genuinely retires an id, and a merge is rare enough to be worth a stale entry.
+function setAsideMissing(truncated) {
+  // /api/graph caps its snapshot by degree, so if the cap was hit, absence from
+  // it proves nothing at all about the entity and nothing may be set aside.
+  if (truncated) return;
+  const here = new Set(allNodes.map(n => n.id));
+  for (const [id, xy] of [...pins]) {
+    if (!here.has(id)) { absent[id] = { pin: xy }; pins.delete(id); }
+  }
+  for (const [id, xy] of [...seeds]) {
+    if (!here.has(id)) {
+      absent[id] = Object.assign(absent[id] || {}, { seed: xy });
+      seeds.delete(id);
+    }
+  }
+  // And the other direction: an entity that has come back takes its seat back.
+  for (const id of Object.keys(absent)) {
+    if (!here.has(id)) continue;
+    const kept = absent[id];
+    if (kept.pin) pins.set(id, kept.pin);
+    if (kept.seed) seeds.set(id, kept.seed);
+    delete absent[id];
+  }
+}
+
+function layoutPayload(dropAbsent) {
+  // Seeds are read off the canvas at save time rather than tracked as things
+  // move, so one write records the whole board as it actually stands.
+  if (network) {
+    const live = network.getPositions();
+    for (const id of Object.keys(live)) {
+      seeds.set(id, [Math.round(live[id].x), Math.round(live[id].y)]);
+    }
+  }
+  for (const [id, xy] of pins) seeds.set(id, xy);
+  return {
+    v: LAYOUT_VERSION,
+    mode: layoutMode,
+    pins: Object.fromEntries(pins),
+    seeds: Object.fromEntries(seeds),
+    absent: dropAbsent ? {} : absent,
+  };
+}
+
+function saveLater(delay) {
+  if (!layoutLoaded) return;
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveLayout, delay === undefined ? 700 : delay);
+}
+
+async function saveLayout(dropAbsent) {
+  if (!layoutLoaded) return;
+  // A slow POST must not interleave with the next one and land out of order.
+  if (saveInFlight) { saveQueued = true; return; }
+  saveInFlight = true;
+  try {
+    const res = await fetch('/api/graph/layout', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(layoutPayload(dropAbsent)),
+    });
+    if (res.status === 413 && !dropAbsent) {
+      // Too big. The positions of entities that are not even in this graph are
+      // the one part worth spending first, so they go and the rest is kept.
+      saveInFlight = false;
+      absent = {};
+      note('the arrangement outgrew its limit, so positions for entities no ' +
+           'longer in this graph were dropped', 'bad');
+      return saveLayout(true);
+    }
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      throw new Error((body && body.detail) || ('HTTP ' + res.status));
+    }
+    note('');
+  } catch (err) {
+    note('the arrangement could not be saved: ' + err.message, 'bad');
+  } finally {
+    saveInFlight = false;
+    if (saveQueued) { saveQueued = false; saveLater(0); }
+  }
+}
+
+// Its own line, kept until something is done about it. The status line is
+// rewritten on every keystroke, and a warning that can be typed away is a
+// warning nobody reads.
+function note(text, kind) {
+  const el = document.getElementById('layoutNote');
+  el.textContent = text || '';
+  el.hidden = !text;
+  el.className = 'small' + (text && kind ? ' ' + kind : '');
 }
 
 async function loadInferred() {
@@ -227,14 +396,73 @@ function build() {
     },
   });
 
+  // The arrangement is asserted immediately, in the same turn as the
+  // construction. vis's improvedLayout pass runs on data load and ends by
+  // translating every node it laid out - fixed ones included - toward the
+  // centre, so a coordinate written into the node data beforehand would be
+  // shifted out from under itself. Written here instead, after that has
+  // happened and before the first stabilisation batch, which vis schedules on a
+  // timeout of zero.
+  setAsideMissing(allNodes.length >= 1500);
+  restoreLayout();
+  applyMode();
+
   // A pan is a click as far as the canvas is concerned - press, move, release,
   // and vis reports a click on empty space at the end of it. Releasing the
   // focus on that makes a focused neighbourhood impossible to move around,
   // which is the main thing anyone wants to do with one. So a drag is
   // remembered and the click that ends it is not treated as a click.
   let dragged = false;
-  network.on('dragStart', () => { dragged = false; });
+  network.on('dragStart', params => {
+    dragged = false;
+    // The one window in which a pinned node can be made draggable again.
+    //
+    // vis takes a snapshot of every selected node's `fixed` flags at the start
+    // of a drag, forces them true for the duration, and then moves a node only
+    // where that SNAPSHOT says the axis was free. So a node held by `fixed`
+    // cannot be dragged a second time - it would be placed once and frozen
+    // forever, with nothing on screen to explain why it had stopped answering.
+    //
+    // This handler is the escape: vis emits dragStart one statement before it
+    // takes the snapshot, and its emitter is synchronous, so a flag cleared
+    // here is already false by the time the snapshot reads it. dragEnd then
+    // restores from that same snapshot - false - and the handler below writes
+    // the pin back afterwards, last and therefore winning.
+    const free = params.nodes
+      .filter(id => pins.has(id))
+      .map(id => ({ id, fixed: { x: false, y: false } }));
+    if (free.length) nodeSet.update(free);
+  });
   network.on('dragging', () => { dragged = true; });
+
+  // Dropping a node is what pins it, in either mode. This is the gesture the
+  // whole feature is: no tool to select first, nothing to switch on.
+  network.on('dragEnd', params => {
+    if (!params.nodes || !params.nodes.length) return;
+    const at = network.getPositions(params.nodes);
+    const held = [];
+    for (const id of params.nodes) {
+      const p = at[id];
+      if (!p) continue;
+      const xy = [Math.round(p.x), Math.round(p.y)];
+      pins.set(id, xy);
+      seeds.set(id, xy);
+      held.push(id);
+    }
+    if (!held.length) return;
+    nodeSet.update(held.map(id => Object.assign(
+      { id, fixed: { x: true, y: true } }, pinLook(id))));
+    refreshPinControls();
+    saveLater();
+  });
+
+  // Double-click releases, and never pins. The asymmetry is deliberate: a stray
+  // double-click on a node somebody was only reading must not silently nail it
+  // to the board, and the reverse mistake undoes itself by dragging.
+  network.on('doubleClick', params => {
+    if (!params.nodes || !params.nodes.length) return;
+    releasePins([params.nodes[0]]);
+  });
 
   network.on('click', params => {
     // The press that dismissed an open dropdown also lands on the canvas, and
@@ -257,6 +485,135 @@ function build() {
     focus(null);
   });
 }
+
+// --- pins, seeds and the two modes ------------------------------------------
+
+// A pinned node wears a pale ring. Without it a board of 60 arranged entities
+// is unreadable - there is no way to tell what you placed from what drifted
+// there - and the first question about a node that will not move is why.
+// Written as colour and border only: focus() rewrites opacity and font on every
+// node, so the ring survives being dimmed and restored.
+function pinLook(id) {
+  const n = allNodes.find(x => x.id === id);
+  const base = (n && (TYPE_COLORS[n.entityType] || OTHER_COLOR)) || OTHER_COLOR;
+  if (!pins.has(id)) {
+    return { color: base, borderWidth: 1, title: n ? n.title : undefined };
+  }
+  return {
+    color: { background: base, border: PIN_RING,
+             highlight: { background: base, border: PIN_RING } },
+    borderWidth: 3,
+    title: (n ? n.title : '') + '\n\npinned — double-click to let it go',
+  };
+}
+
+// Seeds first, then pins over them: a pin is also a seat, and the pin is the
+// one that has to win.
+function restoreLayout() {
+  if (!network) return;
+  for (const [id, xy] of seeds) {
+    if (!pins.has(id) && nodeSet.get(id)) network.moveNode(id, xy[0], xy[1]);
+  }
+  const held = [];
+  for (const [id, xy] of pins) {
+    if (!nodeSet.get(id)) continue;
+    network.moveNode(id, xy[0], xy[1]);
+    held.push(Object.assign({ id, fixed: { x: true, y: true } }, pinLook(id)));
+  }
+  if (held.length) nodeSet.update(held);
+  refreshPinControls();
+}
+
+function releasePins(ids) {
+  const let_go = ids.filter(id => pins.has(id));
+  if (!let_go.length) return;
+  const at = network ? network.getPositions(let_go) : {};
+  const updates = [];
+  for (const id of let_go) {
+    pins.delete(id);
+    // The seat is kept at wherever it is standing now. Sending no x/y at all
+    // is what stops it teleporting, and recording the seed is what stops a
+    // later rebuild putting it back where it used to be pinned.
+    if (at[id]) seeds.set(id, [Math.round(at[id].x), Math.round(at[id].y)]);
+    updates.push(Object.assign(
+      { id, fixed: { x: false, y: false } }, pinLook(id)));
+  }
+  nodeSet.update(updates);
+  refreshPinControls();
+  saveLater();
+}
+
+function applyMode() {
+  if (!network) return;
+  // Static is the whole solver switched off: nothing drifts, nothing settles,
+  // and a node dragged in it still moves, because a drag writes the position
+  // directly and never asks physics. Reactive is today's behaviour, which is
+  // what an unarranged graph should do.
+  network.setOptions({ physics: { enabled: layoutMode === 'reactive' } });
+  for (const [id, on] of [['modeReactive', layoutMode === 'reactive'],
+                          ['modeStatic', layoutMode === 'static']]) {
+    const el = document.getElementById(id);
+    el.classList.toggle('on', on);
+    el.setAttribute('aria-pressed', on ? 'true' : 'false');
+  }
+}
+
+function refreshPinControls() {
+  const btn = document.getElementById('releaseAll');
+  if (released) {
+    btn.hidden = false;
+    btn.textContent = `Undo release (${released.size})`;
+    btn.classList.remove('danger');
+    return;
+  }
+  btn.hidden = pins.size === 0;
+  btn.textContent = `Release all (${pins.size})`;
+}
+
+// Release all keeps what it released for twelve seconds and holds the save
+// back for the same twelve, so a release that is taken back never reaches the
+// case file at all. That is better than a confirmation box: it costs nothing
+// when the operator meant it, and it is a real undo when they did not.
+function releaseAll() {
+  if (released) {          // the button is showing "Undo release"
+    const back = released;
+    released = null;
+    clearTimeout(releaseTimer);
+    for (const [id, xy] of back) pins.set(id, xy);
+    restoreLayout();
+    note('');
+    saveLater();
+    return;
+  }
+  if (!pins.size) return;
+  released = new Map(pins);
+  releasePins([...pins.keys()]);
+  refreshPinControls();
+  note(`${released.size} entit${released.size === 1 ? 'y' : 'ies'} released — ` +
+       `they stay where they are and move with the graph again. ` +
+       `Nothing about the case has changed yet.`, 'pending');
+  clearTimeout(saveTimer);          // nothing is written inside the window
+  releaseTimer = setTimeout(() => {
+    released = null;
+    refreshPinControls();
+    note('');
+    saveLayout();
+  }, RELEASE_UNDO_MS);
+}
+
+document.getElementById('releaseAll').addEventListener('click', releaseAll);
+document.getElementById('modeReactive').addEventListener('click', () => {
+  if (layoutMode === 'reactive') return;
+  layoutMode = 'reactive';
+  applyMode();
+  saveLater();
+});
+document.getElementById('modeStatic').addEventListener('click', () => {
+  if (layoutMode === 'static') return;
+  layoutMode = 'static';
+  applyMode();
+  saveLater();
+});
 
 // --- focus ------------------------------------------------------------------
 

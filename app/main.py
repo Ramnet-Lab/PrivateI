@@ -1222,6 +1222,16 @@ def api_purge(payload: dict):
                 # are the authority the edges were drawn from and are separate.
                 rows["entity_links"] = conn.execute(
                     "DELETE FROM entity_links").rowcount
+                # The graph layout is keyed by entity id, and every entity it
+                # names has just been deleted. It is the same kind of row as a
+                # report seed: case material that happens to live in the
+                # settings table, and it goes with the case rather than with
+                # the configuration. Left behind it would be worse than
+                # useless - an entity id is "TYPE:normalised name", so the
+                # next case to contain a Jane Doe would find her pinned to a
+                # position somebody chose while looking at this one.
+                rows["graph_layout"] = conn.execute(
+                    "DELETE FROM settings WHERE key=?", (LAYOUT_KEY,)).rowcount
 
             # The passage vectors live in the chunks rows just deleted, and
             # the search matrix is a cached copy of them held in memory. It
@@ -1272,6 +1282,73 @@ def api_purge(payload: dict):
     return JSONResponse({"purged": True, "scope": scope, "rows": rows,
                          "graph": graph_deleted, "files": files,
                          "kept_in_01_raw": kept_in_raw, "aborted": aborted})
+
+
+# --- the graph layout ------------------------------------------------------
+#
+# Where the entities sit on the graph page, kept in the settings table under one
+# key. It is stored on the server rather than in the browser for the reason the
+# purge above deletes it: an arrangement an investigator built by hand is a
+# reading of the case, and this application's promise is that data/ holds the
+# whole of the case. In localStorage it would not travel with the folder, would
+# not survive a cleared profile, and - worst - could not be destroyed by a purge,
+# so it would outlive the entities it names and reattach itself to whatever the
+# next case called by the same name.
+#
+# The payload is opaque to this module on purpose. What a position means, which
+# node is pinned and which is only remembered, and how a version is migrated are
+# the graph page's business; this route's business is that the blob is JSON, is
+# not enormous, and belongs to this case.
+LAYOUT_KEY = "graph_layout"
+# Roughly 128 entities cost 6 KB, so this is about forty times the corpus this
+# was built against. It is a guard against a runaway client, not a budget: the
+# page is told when it trips so it can shed what it can spare and say so.
+MAX_LAYOUT_BYTES = 256 * 1024
+
+
+@app.get("/api/graph/layout")
+def api_graph_layout():
+    """The stored arrangement, or an empty object when there is none.
+
+    An empty object and a missing row are the same answer, and both are
+    different from a failure: the page writes nothing at all until it has read
+    this successfully, so an error here must arrive as an error rather than as
+    an empty layout that would be taken for "nothing saved yet" and overwritten.
+    """
+    raw = state.get_setting(LAYOUT_KEY, "")
+    if not raw:
+        return JSONResponse({})
+    try:
+        return JSONResponse(json.loads(raw))
+    except (ValueError, TypeError):
+        # Unreadable is not empty. Saying so lets the page keep its own writes
+        # switched off rather than replacing a row it could not parse.
+        raise HTTPException(
+            status_code=500,
+            detail="the stored graph layout is not readable as JSON")
+
+
+@app.post("/api/graph/layout")
+def api_graph_layout_save(payload: dict):
+    """Replace the stored arrangement.
+
+    A whole-document replace rather than a merge, because the page holds the
+    authoritative copy in memory and a merge would need this module to
+    understand the shape - which is exactly what it is trying not to do.
+    """
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="the layout must be an object")
+    blob = json.dumps(payload, separators=(",", ":"))
+    if len(blob.encode("utf-8")) > MAX_LAYOUT_BYTES:
+        # 413 rather than a silent truncation. A layout stored with some of its
+        # positions dropped is an arrangement the operator did not make, and
+        # they would have no way of knowing which parts of it were theirs.
+        raise HTTPException(
+            status_code=413,
+            detail=f"the layout is larger than "
+                   f"{MAX_LAYOUT_BYTES // 1024} KB and was not saved")
+    state.set_setting(LAYOUT_KEY, blob)
+    return JSONResponse({"saved": True})
 
 
 # --- data for the pages ----------------------------------------------------

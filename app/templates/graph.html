@@ -67,8 +67,25 @@
       </div>
     </div>
 
+    {# Two controls, not one. Dropping a node keeps it where it was dropped in
+       either mode - that is a property of the gesture and needs no mode at all.
+       The segment below is the separate thing: whether everything you have not
+       touched is still settling. Fusing them would mean "drag a node while
+       reactive and it still springs back", which is the complaint this answers. #}
+    <div class="seg" role="group" aria-label="Layout behaviour">
+      <button type="button" class="seg-btn on" id="modeReactive"
+              aria-pressed="true">reactive</button>
+      <button type="button" class="seg-btn" id="modeStatic"
+              aria-pressed="false">static</button>
+    </div>
+    <button id="releaseAll" class="btn" hidden>Release all</button>
+
     <button id="refit" class="btn">Fit</button>
     <span id="graphStatus" class="small" role="status" aria-live="polite"></span>
+    {# Its own line, and it stays until it is dealt with. A save failure written
+       into the status line above would be gone on the next keystroke, which is
+       the one message on this page that must not be. #}
+    <span id="layoutNote" class="small" role="status" hidden></span>
   </div>
 </div>
 {% endblock %}
